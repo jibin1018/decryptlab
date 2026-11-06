@@ -1,7 +1,7 @@
 /* 해시·MAC·KDF */
 (function (DL) {
   'use strict';
-  const { utf8, toHex, readBytes, formatBytes, fmtOption, concat, subtle, md5, crc32 } = DL;
+  const { utf8, toHex, readBytes, formatBytes, fmtOption, concat, subtle, md5, crc32, b64encode, b64decode, randomBytes, equalBytes } = DL;
 
   const sha = async (algo, bytes) => new Uint8Array(await subtle().digest(algo, bytes));
 
@@ -406,6 +406,223 @@
     return pb(pass, B, dkLen);
   }
 
+  /* =================== Whirlpool (ISO/IEC 10118-3) — BigInt 64비트 레인 =================== */
+  const WP = (() => {
+    const E = [0x1, 0xB, 0x9, 0xC, 0xD, 0x6, 0xF, 0x3, 0xE, 0x8, 0x7, 0x4, 0xA, 0x2, 0x5, 0x0];
+    const Rb = [0x7, 0xC, 0xB, 0xD, 0xE, 0x4, 0x9, 0xF, 0x6, 0x3, 0x8, 0xA, 0x2, 0x5, 0x1, 0x0];
+    const Einv = []; E.forEach((v, i) => { Einv[v] = i; });
+    const sbox = new Uint8Array(256);
+    for (let x = 0; x < 256; x++) { const h = E[x >> 4], l = Einv[x & 15], i = Rb[h ^ l]; sbox[x] = (E[h ^ i] << 4) | Einv[l ^ i]; }
+    const gmul = (a, b) => { let p = 0; for (let i = 0; i < 8; i++) { if (b & 1) p ^= a; const hi = a & 0x80; a = (a << 1) & 0xff; if (hi) a ^= 0x1d; b >>= 1; } return p & 0xff; };
+    const mask = (1n << 64n) - 1n, C0 = new Array(256);
+    for (let x = 0; x < 256; x++) { const s = sbox[x]; const bs = [gmul(s, 1), gmul(s, 1), gmul(s, 4), gmul(s, 1), gmul(s, 8), gmul(s, 5), gmul(s, 2), gmul(s, 9)]; let v = 0n; for (const b of bs) v = (v << 8n) | BigInt(b); C0[x] = v; }
+    const RC = [0n]; for (let r = 1; r <= 10; r++) { let v = 0n; for (let j = 0; j < 8; j++) v = (v << 8n) | BigInt(sbox[8 * (r - 1) + j]); RC[r] = v; }
+    const Ct = (t, x) => { const n = BigInt(8 * t); return ((C0[x] >> n) | (C0[x] << (64n - n))) & mask; };
+    const byteAt = (v, i) => Number((v >> BigInt(56 - 8 * i)) & 0xffn);
+    return { RC, Ct, byteAt };
+  })();
+  function whirlpool(msg) {
+    const { RC, Ct, byteAt } = WP;
+    const bitLen = BigInt(msg.length) * 8n;
+    const data = [...msg, 0x80]; while (data.length % 64 !== 32) data.push(0);
+    const lb = new Array(32).fill(0); let bl = bitLen; for (let i = 31; i >= 0 && bl > 0n; i--) { lb[i] = Number(bl & 0xffn); bl >>= 8n; } data.push(...lb);
+    const hash = new Array(8).fill(0n);
+    for (let off = 0; off < data.length; off += 64) {
+      const block = new Array(8); for (let i = 0; i < 8; i++) { let v = 0n; for (let j = 0; j < 8; j++) v = (v << 8n) | BigInt(data[off + 8 * i + j]); block[i] = v; }
+      const K = hash.slice(), state = new Array(8);
+      for (let i = 0; i < 8; i++) state[i] = block[i] ^ K[i];
+      for (let r = 1; r <= 10; r++) {
+        const L = new Array(8);
+        for (let i = 0; i < 8; i++) { let v = 0n; for (let t = 0; t < 8; t++) v ^= Ct(t, byteAt(K[(i - t + 8) & 7], t)); L[i] = v; }
+        L[0] ^= RC[r]; for (let i = 0; i < 8; i++) K[i] = L[i];
+        const M = new Array(8);
+        for (let i = 0; i < 8; i++) { let v = 0n; for (let t = 0; t < 8; t++) v ^= Ct(t, byteAt(state[(i - t + 8) & 7], t)); M[i] = v ^ K[i]; }
+        for (let i = 0; i < 8; i++) state[i] = M[i];
+      }
+      for (let i = 0; i < 8; i++) hash[i] = hash[i] ^ state[i] ^ block[i];
+    }
+    const out = new Uint8Array(64); for (let i = 0; i < 8; i++) { let v = hash[i]; for (let j = 7; j >= 0; j--) { out[i * 8 + j] = Number(v & 0xffn); v >>= 8n; } }
+    return out;
+  }
+
+  /* =================== BLAKE3 (트리 해싱 + XOF) =================== */
+  const B3IV = [0x6A09E667, 0xBB67AE85, 0x3C6EF372, 0xA54FF53A, 0x510E527F, 0x9B05688C, 0x1F83D9AB, 0x5BE0CD19];
+  const B3PERM = [2, 6, 3, 10, 7, 0, 4, 13, 1, 11, 12, 5, 9, 14, 15, 8];
+  function blake3(input, outLen = 32) {
+    const rotr = (x, n) => ((x >>> n) | (x << (32 - n))) >>> 0;
+    const g = (s, a, b, c, d, mx, my) => { s[a] = (s[a] + s[b] + mx) >>> 0; s[d] = rotr(s[d] ^ s[a], 16); s[c] = (s[c] + s[d]) >>> 0; s[b] = rotr(s[b] ^ s[c], 12); s[a] = (s[a] + s[b] + my) >>> 0; s[d] = rotr(s[d] ^ s[a], 8); s[c] = (s[c] + s[d]) >>> 0; s[b] = rotr(s[b] ^ s[c], 7); };
+    const round = (s, m) => { g(s, 0, 4, 8, 12, m[0], m[1]); g(s, 1, 5, 9, 13, m[2], m[3]); g(s, 2, 6, 10, 14, m[4], m[5]); g(s, 3, 7, 11, 15, m[6], m[7]); g(s, 0, 5, 10, 15, m[8], m[9]); g(s, 1, 6, 11, 12, m[10], m[11]); g(s, 2, 7, 8, 13, m[12], m[13]); g(s, 3, 4, 9, 14, m[14], m[15]); };
+    const CS = 1, CE = 2, PAR = 4, ROOT = 8;
+    const compress = (cv, block, counter, blen, flags) => {
+      const s = [cv[0], cv[1], cv[2], cv[3], cv[4], cv[5], cv[6], cv[7], B3IV[0], B3IV[1], B3IV[2], B3IV[3], counter >>> 0, Math.floor(counter / 4294967296) >>> 0, blen, flags];
+      let m = block.slice();
+      for (let r = 0; r < 7; r++) { round(s, m); if (r < 6) { const p = new Array(16); for (let i = 0; i < 16; i++) p[i] = m[B3PERM[i]]; m = p; } }
+      for (let i = 0; i < 8; i++) { s[i] = (s[i] ^ s[i + 8]) >>> 0; s[i + 8] = (s[i + 8] ^ cv[i]) >>> 0; }
+      return s;
+    };
+    const words = (b) => { const m = new Array(16).fill(0); for (let i = 0; i < b.length; i++) m[i >> 2] |= b[i] << ((i & 3) * 8); for (let i = 0; i < 16; i++) m[i] >>>= 0; return m; };
+    const chunkOut = (chunk, counter) => {
+      let cv = B3IV.slice(); const nb = Math.max(1, Math.ceil(chunk.length / 64));
+      for (let i = 0; i < nb - 1; i++) { const blk = chunk.subarray(i * 64, i * 64 + 64); cv = compress(cv, words(blk), counter, 64, i === 0 ? CS : 0).slice(0, 8); }
+      const i = nb - 1, blk = chunk.subarray(i * 64, i * 64 + 64);
+      return { cv, block: words(blk), counter, blen: blk.length, flags: (i === 0 ? CS : 0) | CE };
+    };
+    const cvOf = (o) => compress(o.cv, o.block, o.counter, o.blen, o.flags).slice(0, 8);
+    const leftLen = (n) => { const full = Math.floor((n - 1) / 1024); let p = 1; while (p * 2 <= full) p *= 2; return p * 1024; };
+    const subtree = (inp, counter) => {
+      if (inp.length <= 1024) return chunkOut(inp, counter);
+      const ll = leftLen(inp.length), L = subtree(inp.subarray(0, ll), counter), Rr = subtree(inp.subarray(ll), counter + ll / 1024);
+      return { cv: B3IV.slice(), block: cvOf(L).concat(cvOf(Rr)), counter: 0, blen: 64, flags: PAR };
+    };
+    const o = subtree(input, 0), out = new Uint8Array(outLen); let pos = 0, counter = 0;
+    while (pos < outLen) { const w = compress(o.cv, o.block, counter, o.blen, o.flags | ROOT); for (let i = 0; i < 16 && pos < outLen; i++) for (let b = 0; b < 4 && pos < outLen; b++) out[pos++] = (w[i] >>> (b * 8)) & 0xff; counter++; }
+    return out;
+  }
+
+  /* =================== bcrypt (EksBlowfish) =================== */
+  // P_ORIG(18) + S_ORIG(1024) 블로피시 π 상수를 빅엔디안으로 담은 Base64 (bcryptjs와 동일).
+  const BF_B64 = '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';
+  const BF_BYTES = b64decode(BF_B64);
+  const BF_P = [], BF_S = [];
+  for (let i = 0; i < 18; i++) BF_P.push((BF_BYTES[i * 4] << 24 | BF_BYTES[i * 4 + 1] << 16 | BF_BYTES[i * 4 + 2] << 8 | BF_BYTES[i * 4 + 3]) >>> 0);
+  for (let i = 0; i < 1024; i++) { const o = (18 + i) * 4; BF_S.push((BF_BYTES[o] << 24 | BF_BYTES[o + 1] << 16 | BF_BYTES[o + 2] << 8 | BF_BYTES[o + 3]) >>> 0); }
+  const BF_C = [0x4f727068, 0x65616e42, 0x65686f6c, 0x64657253, 0x63727944, 0x6f756274];
+  const BCB64 = './ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+  const BC_INV = {}; for (let i = 0; i < BCB64.length; i++) BC_INV[BCB64[i]] = i;
+  function bcB64enc(bytes, len) {
+    let out = '', i = 0;
+    while (i < len) {
+      let c1 = bytes[i++] & 0xff; out += BCB64[(c1 >> 2) & 0x3f]; c1 = (c1 & 0x03) << 4;
+      if (i >= len) { out += BCB64[c1 & 0x3f]; break; }
+      let c2 = bytes[i++] & 0xff; c1 |= (c2 >> 4) & 0x0f; out += BCB64[c1 & 0x3f]; c1 = (c2 & 0x0f) << 2;
+      if (i >= len) { out += BCB64[c1 & 0x3f]; break; }
+      c2 = bytes[i++] & 0xff; c1 |= (c2 >> 6) & 0x03; out += BCB64[c1 & 0x3f] + BCB64[c2 & 0x3f];
+    }
+    return out;
+  }
+  function bcB64dec(str, len) {
+    const out = []; let i = 0; const ch = () => BC_INV[str[i++]];
+    while (out.length < len && i < str.length) {
+      const c1 = ch(), c2 = ch(); out.push(((c1 << 2) | (c2 >> 4)) & 0xff); if (out.length >= len) break;
+      const c3 = ch(); out.push((((c2 & 0x0f) << 4) | (c3 >> 2)) & 0xff); if (out.length >= len) break;
+      const c4 = ch(); out.push((((c3 & 0x03) << 6) | c4) & 0xff);
+    }
+    return Uint8Array.from(out.slice(0, len));
+  }
+  function bcryptRaw(passBytes, cost, salt16) {
+    const P = BF_P.slice(), S = BF_S.slice();
+    const f = (x) => { let a = (S[(x >>> 24) & 0xff] + S[256 + ((x >>> 16) & 0xff)]) >>> 0; a = (a ^ S[512 + ((x >>> 8) & 0xff)]) >>> 0; return (a + S[768 + (x & 0xff)]) >>> 0; };
+    const encipher = (lr) => {
+      let l = lr[0] >>> 0, r = lr[1] >>> 0;
+      for (let i = 0; i < 16; i++) { l = (l ^ P[i]) >>> 0; r = (r ^ f(l)) >>> 0; const t = l; l = r; r = t; }
+      const t = l; l = r; r = t; lr[0] = (l ^ P[17]) >>> 0; lr[1] = (r ^ P[16]) >>> 0;
+    };
+    const stream = (data) => { let j = 0; return () => { let w = 0; for (let k = 0; k < 4; k++) w = ((w << 8) | data[j++ % data.length]) >>> 0; return w >>> 0; }; };
+    const expand = (data, key) => {
+      const ks = stream(key); for (let i = 0; i < 18; i++) P[i] = (P[i] ^ ks()) >>> 0;
+      const ds = data ? stream(data) : () => 0; const lr = [0, 0];
+      for (let i = 0; i < 18; i += 2) { lr[0] = (lr[0] ^ ds()) >>> 0; lr[1] = (lr[1] ^ ds()) >>> 0; encipher(lr); P[i] = lr[0]; P[i + 1] = lr[1]; }
+      for (let i = 0; i < 1024; i += 2) { lr[0] = (lr[0] ^ ds()) >>> 0; lr[1] = (lr[1] ^ ds()) >>> 0; encipher(lr); S[i] = lr[0]; S[i + 1] = lr[1]; }
+    };
+    expand(salt16, passBytes);
+    const rounds = 1 << cost;
+    for (let k = 0; k < rounds; k++) { expand(null, passBytes); expand(null, salt16); }
+    const cdata = BF_C.slice();
+    for (let i = 0; i < 64; i++) for (let j = 0; j < 6; j += 2) { const lr = [cdata[j], cdata[j + 1]]; encipher(lr); cdata[j] = lr[0]; cdata[j + 1] = lr[1]; }
+    const out = new Uint8Array(24); for (let i = 0; i < 6; i++) { out[i * 4] = (cdata[i] >>> 24) & 0xff; out[i * 4 + 1] = (cdata[i] >>> 16) & 0xff; out[i * 4 + 2] = (cdata[i] >>> 8) & 0xff; out[i * 4 + 3] = cdata[i] & 0xff; }
+    return out.subarray(0, 23);
+  }
+  function bcryptHashStr(password, saltStr) {
+    const m = /^\$2([abxy])\$(\d\d)\$(.{22})/.exec(saltStr);
+    if (!m) throw new Error('bcrypt 솔트 형식은 $2a$비용$22자 여야 합니다.');
+    const cost = parseInt(m[2], 10);
+    if (cost < 4 || cost > 31) throw new Error('bcrypt 비용(cost)은 4–31이어야 합니다.');
+    let pb = utf8(password); const nul = new Uint8Array(pb.length + 1); nul.set(pb); pb = nul; // null 종단
+    if (pb.length > 72) pb = pb.subarray(0, 72);
+    return `$2${m[1]}$${m[2]}$${m[3]}${bcB64enc(bcryptRaw(pb, cost, bcB64dec(m[3], 16)), 23)}`;
+  }
+  function bcryptGenSalt(cost) { return `$2b$${String(cost).padStart(2, '0')}$${bcB64enc(randomBytes(16), 16)}`; }
+  function bcryptVerify(password, hashStr) { const h = hashStr.trim(); return bcryptHashStr(password, h.slice(0, 29)) === h; }
+
+  /* =================== Argon2 (RFC 9106) — BLAKE2b 기반, BigInt 64비트 =================== */
+  const A_MASK = (1n << 64n) - 1n;
+  const le32b = (n) => Uint8Array.of(n & 255, (n >>> 8) & 255, (n >>> 16) & 255, (n >>> 24) & 255);
+  function argonHprime(X, tagLen) {
+    if (tagLen <= 64) return blake2b(concat(le32b(tagLen), X), tagLen);
+    const r = Math.ceil(tagLen / 32) - 2; let out = new Uint8Array(0);
+    let v = blake2b(concat(le32b(tagLen), X), 64); out = concat(out, v.subarray(0, 32));
+    for (let i = 1; i < r; i++) { v = blake2b(v, 64); out = concat(out, v.subarray(0, 32)); }
+    return concat(out, blake2b(v, tagLen - 32 * r));
+  }
+  const aRotr = (x, n) => ((x >> n) | (x << (64n - n))) & A_MASK;
+  function aGB(v, a, b, c, d) {
+    const lo = (x) => x & 0xffffffffn;
+    v[a] = (v[a] + v[b] + 2n * lo(v[a]) * lo(v[b])) & A_MASK; v[d] = aRotr(v[d] ^ v[a], 32n);
+    v[c] = (v[c] + v[d] + 2n * lo(v[c]) * lo(v[d])) & A_MASK; v[b] = aRotr(v[b] ^ v[c], 24n);
+    v[a] = (v[a] + v[b] + 2n * lo(v[a]) * lo(v[b])) & A_MASK; v[d] = aRotr(v[d] ^ v[a], 16n);
+    v[c] = (v[c] + v[d] + 2n * lo(v[c]) * lo(v[d])) & A_MASK; v[b] = aRotr(v[b] ^ v[c], 63n);
+  }
+  function aP(v) {
+    aGB(v, 0, 4, 8, 12); aGB(v, 1, 5, 9, 13); aGB(v, 2, 6, 10, 14); aGB(v, 3, 7, 11, 15);
+    aGB(v, 0, 5, 10, 15); aGB(v, 1, 6, 11, 12); aGB(v, 2, 7, 8, 13); aGB(v, 3, 4, 9, 14);
+  }
+  function aCompress(X, Y, out, xor) {
+    const R = new BigUint64Array(128); for (let i = 0; i < 128; i++) R[i] = X[i] ^ Y[i];
+    const Z = new BigUint64Array(R); const tmp = new Array(16);
+    for (let r = 0; r < 8; r++) { for (let k = 0; k < 16; k++) tmp[k] = Z[r * 16 + k]; aP(tmp); for (let k = 0; k < 16; k++) Z[r * 16 + k] = tmp[k]; }
+    for (let c = 0; c < 8; c++) { for (let r = 0; r < 8; r++) { tmp[2 * r] = Z[16 * r + 2 * c]; tmp[2 * r + 1] = Z[16 * r + 2 * c + 1]; } aP(tmp); for (let r = 0; r < 8; r++) { Z[16 * r + 2 * c] = tmp[2 * r]; Z[16 * r + 2 * c + 1] = tmp[2 * r + 1]; } }
+    for (let i = 0; i < 128; i++) { const val = Z[i] ^ R[i]; out[i] = xor ? (out[i] ^ val) : val; }
+  }
+  const aBlockBytes = (blk) => { const b = new Uint8Array(1024); const dv = new DataView(b.buffer); for (let i = 0; i < 128; i++) dv.setBigUint64(i * 8, blk[i], true); return b; };
+  const aBytesBlock = (bytes) => { const blk = new BigUint64Array(128); const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength); for (let i = 0; i < 128; i++) blk[i] = dv.getBigUint64(i * 8, true); return blk; };
+  function argon2Compute(type, pw, salt, p, tCost, mKiB, tagLen) {
+    const TYPE = { d: 0, i: 1, id: 2 }[type];
+    const H0 = blake2b(concat(le32b(p), le32b(tagLen), le32b(mKiB), le32b(tCost), le32b(0x13), le32b(TYPE),
+      le32b(pw.length), pw, le32b(salt.length), salt, le32b(0), new Uint8Array(0), le32b(0), new Uint8Array(0)), 64);
+    const mPrime = 4 * p * Math.floor(mKiB / (4 * p));
+    const q = mPrime / p, segLen = q / 4;
+    const B = []; for (let i = 0; i < p; i++) B.push(new Array(q));
+    for (let i = 0; i < p; i++) {
+      B[i][0] = aBytesBlock(argonHprime(concat(H0, le32b(0), le32b(i)), 1024));
+      B[i][1] = aBytesBlock(argonHprime(concat(H0, le32b(1), le32b(i)), 1024));
+    }
+    const zero = new BigUint64Array(128);
+    for (let pass = 0; pass < tCost; pass++) for (let slice = 0; slice < 4; slice++) for (let lane = 0; lane < p; lane++) {
+      const dataIndep = (TYPE === 1) || (TYPE === 2 && pass === 0 && slice < 2);
+      let addr = null, inp = null;
+      if (dataIndep) { inp = new BigUint64Array(128); inp[0] = BigInt(pass); inp[1] = BigInt(lane); inp[2] = BigInt(slice); inp[3] = BigInt(mPrime); inp[4] = BigInt(tCost); inp[5] = BigInt(TYPE); addr = new BigUint64Array(128); }
+      for (let idx = 0; idx < segLen; idx++) {
+        if (dataIndep && (idx % 128) === 0) { inp[6] += 1n; aCompress(zero, inp, addr, false); const t2 = new BigUint64Array(128); aCompress(zero, addr, t2, false); addr.set(t2); }
+        if (pass === 0 && slice === 0 && idx < 2) continue;
+        const col = slice * segLen + idx, prevCol = (col === 0) ? q - 1 : col - 1;
+        let J1, J2;
+        if (dataIndep) { const pr = addr[idx % 128]; J1 = Number(pr & 0xffffffffn); J2 = Number((pr >> 32n) & 0xffffffffn); }
+        else { const pr = B[lane][prevCol][0]; J1 = Number(pr & 0xffffffffn); J2 = Number((pr >> 32n) & 0xffffffffn); }
+        const refLane = (pass === 0 && slice === 0) ? lane : (J2 % p);
+        let refAreaSize;
+        if (pass === 0) { if (slice === 0) refAreaSize = idx - 1; else if (refLane === lane) refAreaSize = slice * segLen + idx - 1; else refAreaSize = slice * segLen - (idx === 0 ? 1 : 0); }
+        else { if (refLane === lane) refAreaSize = q - segLen + idx - 1; else refAreaSize = q - segLen - (idx === 0 ? 1 : 0); }
+        if (refAreaSize < 1) refAreaSize = 1;
+        const J1b = BigInt(J1), xb = (J1b * J1b) >> 32n, yb = (BigInt(refAreaSize) * xb) >> 32n, zb = BigInt(refAreaSize) - 1n - yb;
+        const startPos = (pass !== 0) ? (slice === 3 ? 0 : (slice + 1) * segLen) : 0;
+        const refCol = Number((BigInt(startPos) + zb) % BigInt(q));
+        if (!B[lane][col]) B[lane][col] = new BigUint64Array(128);
+        aCompress(B[lane][prevCol], B[refLane][refCol], B[lane][col], pass !== 0);
+      }
+    }
+    const final = new BigUint64Array(128); for (let i = 0; i < p; i++) for (let k = 0; k < 128; k++) final[k] ^= B[i][q - 1][k];
+    return argonHprime(aBlockBytes(final), tagLen);
+  }
+  const argonEncode = (type, p, t, m, salt, tag) => `$argon2${type}$v=19$m=${m},t=${t},p=${p}$${b64encode(salt, { nopad: true })}$${b64encode(tag, { nopad: true })}`;
+  function argon2Verify(password, phc) {
+    const m = /^\$argon2(id|i|d)\$v=(\d+)\$m=(\d+),t=(\d+),p=(\d+)\$([^$]+)\$([^$]+)$/.exec(phc.trim());
+    if (!m) throw new Error('Argon2 PHC 형식이 아닙니다. 예: $argon2id$v=19$m=...,t=...,p=...$salt$hash');
+    if (m[2] !== '19') throw new Error(`지원하지 않는 Argon2 버전입니다 (v=${m[2]}). v=19만 지원합니다.`);
+    const salt = b64decode(m[6]), tag = b64decode(m[7]);
+    const got = argon2Compute(m[1], utf8(password), salt, +m[5], +m[4], +m[3], tag.length);
+    return equalBytes(got, tag);
+  }
+
   async function allHashes(bytes, group = 'common') {
     const rows = [];
     if (group === 'common' || group === 'all') {
@@ -416,7 +633,7 @@
       rows.push(['SHA3-224', toHex(sha3(bytes, 224))], ['SHA3-256', toHex(sha3(bytes, 256))], ['SHA3-384', toHex(sha3(bytes, 384))], ['SHA3-512', toHex(sha3(bytes, 512))],
         ['Keccak-256', toHex(keccakHash(bytes, 256))], ['Keccak-512', toHex(keccakHash(bytes, 512))]);
     }
-    if (group === 'blake' || group === 'all') rows.push(['BLAKE2b-512', toHex(blake2b(bytes, 64))], ['BLAKE2b-256', toHex(blake2b(bytes, 32))], ['BLAKE2s-256', toHex(blake2s(bytes, 32))]);
+    if (group === 'blake' || group === 'all') rows.push(['BLAKE2b-512', toHex(blake2b(bytes, 64))], ['BLAKE2b-256', toHex(blake2b(bytes, 32))], ['BLAKE2s-256', toHex(blake2s(bytes, 32))], ['BLAKE3-256', toHex(blake3(bytes, 32))]);
     if (group === 'checksum' || group === 'all') {
       rows.push(['CRC32', hx(crc32(bytes), 8)], ['CRC32C', hx(crc32c(bytes), 8)], ['CRC64/XZ', hx(crc64xz(bytes), 16)],
         ['CRC16/ARC', hx(crcGeneric(bytes, { width: 16, poly: 0x8005, init: 0, refin: true, refout: true, xorout: 0 }), 4)],
@@ -425,7 +642,7 @@
         ['Adler-32', hx(adler32(bytes), 8)], ['FNV-1a 32', hx(fnv1a32(bytes), 8)], ['FNV-1a 64', hx(fnv1a64(bytes), 16)],
         ['xxHash32', hx(xxh32(bytes), 8)], ['xxHash64', hx(xxh64(bytes), 16)], ['Murmur3-32', hx(murmur3(bytes), 8)]);
     }
-    if (group === 'etc' || group === 'all') rows.push(['RIPEMD-160', toHex(ripemd160(bytes))], ['SM3', toHex(sm3(bytes))]);
+    if (group === 'etc' || group === 'all') rows.push(['RIPEMD-160', toHex(ripemd160(bytes))], ['SM3', toHex(sm3(bytes))], ['Whirlpool', toHex(whirlpool(bytes))]);
     return group === 'all' ? rows.filter((r, i) => rows.findIndex((x) => x[0] === r[0]) === i) : rows;
   }
 
@@ -463,7 +680,7 @@
     return value.toLowerCase() === t ? '\n\n✓ 비교값과 일치합니다.' : '\n\n✗ 비교값과 일치하지 않습니다.';
   };
 
-  Object.assign(DL.fn, { ripemd160, sm3, xxh32, xxh64, murmur3, scrypt, allHashes, hmac, sha3, keccakHash, shake, blake2b, blake2s, adler32, crc32c, crc64xz, crcGeneric, fnv1a32, fnv1a64 });
+  Object.assign(DL.fn, { ripemd160, sm3, xxh32, xxh64, murmur3, scrypt, allHashes, hmac, sha3, keccakHash, shake, blake2b, blake2s, blake3, whirlpool, adler32, crc32c, crc64xz, crcGeneric, fnv1a32, fnv1a64, bcryptHashStr, bcryptGenSalt, bcryptVerify, argon2Compute, argonEncode, argon2Verify });
 
   const HASHES = [['SHA-256', 'SHA-256'], ['SHA-1', 'SHA-1'], ['SHA-384', 'SHA-384'], ['SHA-512', 'SHA-512']];
 
@@ -479,7 +696,7 @@
         fileInput: true, slow: true,
         modes: [{ id: 'run', label: '해시 계산', inLabel: '입력', outLabel: '해시' }],
         options: [
-          { id: 'group', label: '알고리즘', type: 'select', default: 'common', choices: [['common', 'MD5 · SHA-1 · SHA-2'], ['sha3', 'SHA-3 · Keccak'], ['blake', 'BLAKE2'], ['etc', 'RIPEMD-160 · SM3'], ['checksum', '체크섬·비암호 해시'], ['all', '전체']] },
+          { id: 'group', label: '알고리즘', type: 'select', default: 'common', choices: [['common', 'MD5 · SHA-1 · SHA-2'], ['sha3', 'SHA-3 · Keccak'], ['blake', 'BLAKE2 · BLAKE3'], ['etc', 'RIPEMD-160 · SM3 · Whirlpool'], ['checksum', '체크섬·비암호 해시'], ['all', '전체']] },
           fmtOption('inFmt', '입력 형식', 'text', ['text', 'hex', 'base64']),
           { id: 'compare', label: '비교값', type: 'text', default: '', wide: true },
         ],
@@ -492,12 +709,12 @@
         },
       },
       {
-        id: 'shake', name: 'SHAKE (가변 길이)', short: 'SHAKE128 · SHAKE256 XOF',
-        desc: 'SHA-3 계열의 확장 출력 함수(XOF)로, 원하는 길이만큼 해시를 뽑을 수 있습니다. 키 유도나 ML-KEM·ML-DSA 같은 양자내성 암호 내부에서 쓰입니다.',
+        id: 'shake', name: '가변 길이 해시 (XOF)', short: 'SHAKE128 · SHAKE256 · BLAKE3',
+        desc: '확장 출력 함수(XOF)로, 원하는 길이만큼 해시를 뽑을 수 있습니다. SHAKE는 SHA-3 계열로 ML-KEM·ML-DSA 같은 양자내성 암호 내부에, BLAKE3는 빠른 범용 해시·키 유도에 쓰입니다.',
         fileInput: true,
         modes: [{ id: 'run', label: '계산', inLabel: '입력', outLabel: '출력' }],
         options: [
-          { id: 'bits', label: '종류', type: 'select', default: '256', choices: [['128', 'SHAKE128'], ['256', 'SHAKE256']] },
+          { id: 'bits', label: '종류', type: 'select', default: '256', choices: [['128', 'SHAKE128'], ['256', 'SHAKE256'], ['blake3', 'BLAKE3']] },
           { id: 'len', label: '출력 길이(B)', type: 'number', default: 32, min: 1, max: 4096 },
           fmtOption('inFmt', '입력 형식', 'text', ['text', 'hex', 'base64']),
           fmtOption('outFmt', '출력 형식', 'hex', ['hex', 'base64']),
@@ -505,7 +722,8 @@
         run: (s, o) => {
           const len = Number(o.len) || 32;
           if (len < 1 || len > 4096) throw new Error('출력 길이는 1–4096 B여야 합니다.');
-          return formatBytes(shake(readBytes(s, o.inFmt), Number(o.bits), len), o.outFmt);
+          const bytes = readBytes(s, o.inFmt);
+          return formatBytes(o.bits === 'blake3' ? blake3(bytes, len) : shake(bytes, Number(o.bits), len), o.outFmt);
         },
       },
       {
@@ -547,10 +765,49 @@
         ],
         run: async (s, o) => formatBytes(await kdf(readBytes(s, o.inFmt), o), o.outFmt),
       },
+      {
+        id: 'pwhash', name: '비밀번호 해시', short: 'bcrypt · Argon2 (생성·검증)',
+        desc: '비밀번호를 일부러 느리게(그리고 Argon2는 메모리까지 많이 써서) 해시해 무차별 대입을 어렵게 만드는 알고리즘입니다. 로그인 비밀번호 저장에 씁니다. 솔트와 파라미터를 함께 담은 문자열로 나오며, 같은 비밀번호라도 매번 달라집니다. "검증" 모드에 기존 해시 문자열을 넣으면 비밀번호가 맞는지 확인합니다. 모든 계산은 브라우저 안에서만 이뤄집니다. (Argon2는 메모리를 많이 쓰면 브라우저에서 느릴 수 있습니다.)',
+        slow: true,
+        modes: [
+          { id: 'hash', label: '해시 생성', inLabel: '비밀번호', outLabel: '해시 문자열' },
+          { id: 'verify', label: '검증', inLabel: '비밀번호', outLabel: '결과' },
+        ],
+        options: [
+          { id: 'algo', label: '알고리즘', type: 'select', default: 'bcrypt', choices: [['bcrypt', 'bcrypt'], ['argon2id', 'Argon2id (권장)'], ['argon2i', 'Argon2i'], ['argon2d', 'Argon2d']] },
+          { id: 'cost', label: 'cost (2ⁿ 반복)', type: 'number', default: 10, min: 4, max: 16, mode: 'hash', when: (o) => o.algo === 'bcrypt' },
+          { id: 'mem', label: '메모리(KiB)', type: 'number', default: 8192, min: 8, max: 262144, mode: 'hash', when: (o) => o.algo !== 'bcrypt' },
+          { id: 'iter', label: '반복(t)', type: 'number', default: 3, min: 1, max: 20, mode: 'hash', when: (o) => o.algo !== 'bcrypt' },
+          { id: 'par', label: '병렬도(p)', type: 'number', default: 1, min: 1, max: 16, mode: 'hash', when: (o) => o.algo !== 'bcrypt' },
+          { id: 'tag', label: '해시 길이(B)', type: 'number', default: 32, min: 4, max: 128, mode: 'hash', when: (o) => o.algo !== 'bcrypt' },
+          { id: 'verifyHash', label: '기존 해시', type: 'textarea', default: '', wide: true, mode: 'verify', placeholder: '$2b$10$… 또는 $argon2id$v=19$m=…,t=…,p=…$…$…' },
+        ],
+        hash: (s, o) => {
+          if (!s) throw new Error('비밀번호를 입력하세요.');
+          if (o.algo === 'bcrypt') {
+            const cost = Math.min(16, Math.max(4, Number(o.cost) || 10));
+            return bcryptHashStr(s, bcryptGenSalt(cost));
+          }
+          const type = o.algo.slice(6); // id / i / d
+          const p = Math.min(16, Math.max(1, Number(o.par) || 1));
+          const t = Math.min(20, Math.max(1, Number(o.iter) || 3));
+          const m = Math.min(262144, Math.max(8 * p, Number(o.mem) || 8192));
+          const tag = Math.min(128, Math.max(4, Number(o.tag) || 32));
+          const salt = randomBytes(16);
+          return argonEncode(type, p, t, m, salt, argon2Compute(type, utf8(s), salt, p, t, m, tag));
+        },
+        verify: (s, o) => {
+          const h = (o.verifyHash || '').trim();
+          if (!h) throw new Error('"기존 해시" 칸에 검증할 해시 문자열을 넣으세요.');
+          if (!s) throw new Error('비밀번호를 입력하세요.');
+          let okMatch;
+          if (/^\$2[abxy]\$/.test(h)) okMatch = bcryptVerify(s, h);
+          else if (/^\$argon2(id|i|d)\$/.test(h)) okMatch = argon2Verify(s, h);
+          else throw new Error('bcrypt($2…) 또는 Argon2($argon2…) 해시 문자열이어야 합니다.');
+          return okMatch ? '✓ 비밀번호가 일치합니다.' : '✗ 비밀번호가 일치하지 않습니다.';
+        },
+      },
     ],
-    planned: [
-      ['BLAKE3 · Whirlpool', '추가 암호학적 해시'],
-      ['비밀번호 해시 검증', 'bcrypt · Argon2'],
-    ],
+    planned: [],
   });
 })(globalThis.DecryptLab);

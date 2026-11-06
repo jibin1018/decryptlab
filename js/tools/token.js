@@ -329,6 +329,38 @@
     }
     return o.keyFmt === 'hex' ? DL.fromHex(t) : o.keyFmt === 'text' ? utf8(t) : b64decode(t);
   }
+  /* Concat KDF (NIST SP 800-56A, RFC 7518 §4.6) — SHA-256 고정 */
+  const be32 = (n) => Uint8Array.of((n >>> 24) & 255, (n >>> 16) & 255, (n >>> 8) & 255, n & 255);
+  const lenPrefixed = (b) => concat(be32(b.length), b);
+  async function concatKdf(Z, keyBits, algId, apu, apv) {
+    const info = concat(lenPrefixed(utf8(algId)), lenPrefixed(apu), lenPrefixed(apv), be32(keyBits));
+    const outLen = keyBits / 8, reps = Math.ceil(outLen / 32);
+    let out = new Uint8Array(0);
+    for (let i = 1; i <= reps; i++) out = concat(out, new Uint8Array(await subtle().digest('SHA-256', concat(be32(i), Z, info))));
+    return out.slice(0, outLen);
+  }
+  const CRV_BITS = { 'P-256': 256, 'P-384': 384, 'P-521': 528 };
+  // ECDH-ES: 임시 공개키(epk)와 수신자 개인키로 공유 비밀 Z를 만든다.
+  async function ecdhZ(epk, keyText) {
+    if (!epk || typeof epk !== 'object' || (!epk.crv && epk.kty !== 'OKP')) throw new Error('ECDH-ES 토큰 헤더에 임시 공개키(epk)가 없습니다.');
+    const okp = epk.kty === 'OKP';
+    const alg = okp ? { name: 'X25519' } : { name: 'ECDH', namedCurve: epk.crv };
+    let pub, prv;
+    try { pub = await subtle().importKey('jwk', epk, alg, false, []); }
+    catch { throw new Error('토큰의 임시 공개키(epk)를 가져올 수 없습니다 — 지원하지 않는 곡선일 수 있습니다.'); }
+    prv = await DL.fn.importKey(keyText, alg, ['deriveBits'], 'private');
+    const da = okp ? { name: 'X25519', public: pub } : { name: 'ECDH', public: pub };
+    try { return new Uint8Array(await subtle().deriveBits(da, prv, okp ? 256 : (CRV_BITS[epk.crv] || null))); }
+    catch { return new Uint8Array(await subtle().deriveBits(da, prv, null)); }
+  }
+  async function aesKwUnwrap(kek, wrapped, errMsg) {
+    try {
+      const k = await subtle().importKey('raw', kek, 'AES-KW', false, ['unwrapKey']);
+      const raw = await subtle().unwrapKey('raw', wrapped, k, 'AES-KW', { name: 'HMAC', hash: 'SHA-256', length: (wrapped.length - 8) * 8 }, true, ['sign']);
+      return new Uint8Array(await subtle().exportKey('raw', raw));
+    } catch { throw new Error(errMsg); }
+  }
+
   async function jweDecrypt(token, o) {
     const parts = token.trim().split('.');
     if (parts.length !== 5) throw new Error('JWE Compact 형식은 점(.)으로 구분된 5개 부분(header.key.iv.ciphertext.tag)이어야 합니다.');
@@ -339,7 +371,14 @@
     const head = `// Header\n${JSON.stringify(header, null, 2)}\n`;
     const e = JWE_ENC[enc];
     if (!e) return `${head}\n✗ 지원하지 않는 콘텐츠 암호화 방식입니다: ${enc}`;
-    if (!o.key.trim()) return `${head}\n키를 입력하면 복호화합니다. (alg ${alg}: ${alg === 'dir' ? '콘텐츠 암호화 키(CEK) 자체' : /^RSA/.test(alg) ? 'RSA 개인키 PEM/JWK' : /KW$/.test(alg) ? '키 래핑용 AES 키' : '지원하지 않음'})`;
+    if (!o.key.trim()) {
+      const need = alg === 'dir' ? '콘텐츠 암호화 키(CEK) 자체'
+        : /^RSA/.test(alg) ? 'RSA 개인키 PEM/JWK'
+        : /^ECDH-ES/.test(alg) ? '수신자 EC/OKP 개인키 PEM/JWK'
+        : /^PBES2/.test(alg) ? '비밀번호'
+        : /KW$/.test(alg) ? '키 래핑용 AES 키' : '지원하지 않음';
+      return `${head}\n키를 입력하면 복호화합니다. (alg ${alg}: ${need})`;
+    }
     let cek;
     if (alg === 'dir') cek = symKey(o);
     else if (alg === 'RSA-OAEP' || alg === 'RSA-OAEP-256') {
@@ -355,7 +394,23 @@
         const raw = await subtle().unwrapKey('raw', wrapped, k, 'AES-KW', { name: 'HMAC', hash: 'SHA-256', length: (wrapped.length - 8) * 8 }, true, ['sign']);
         cek = new Uint8Array(await subtle().exportKey('raw', raw));
       } catch { throw new Error('키 래핑을 풀 수 없습니다 — AES 키가 맞지 않습니다.'); }
-    } else return `${head}\n✗ 지원하지 않는 키 관리 방식입니다: ${alg} (지원: dir, RSA-OAEP, RSA-OAEP-256, A128KW, A192KW, A256KW)`;
+    } else if (alg === 'ECDH-ES' || /^ECDH-ES\+A(128|192|256)KW$/.test(alg)) {
+      const Z = await ecdhZ(header.epk, o.key);
+      const direct = alg === 'ECDH-ES';
+      const keyBits = direct ? e.len * 8 : Number(alg.slice(9, 12));
+      const apu = header.apu ? b64decode(header.apu) : new Uint8Array(0);
+      const apv = header.apv ? b64decode(header.apv) : new Uint8Array(0);
+      const dk = await concatKdf(Z, keyBits, direct ? enc : alg, apu, apv);
+      cek = direct ? dk : await aesKwUnwrap(dk, b64decode(ek64), 'ECDH로 유도한 키로 래핑을 풀 수 없습니다 — 개인키가 맞지 않거나 apu/apv가 다릅니다.');
+    } else if (/^PBES2-HS(256|384|512)\+A(128|192|256)KW$/.test(alg)) {
+      const bits = Number(alg.slice(-5, -2)), hash = `SHA-${alg.slice(8, 11)}`, p2c = Number(header.p2c);
+      if (!header.p2s || !p2c) throw new Error('PBES2 토큰 헤더에는 p2s(솔트)와 p2c(반복 횟수)가 있어야 합니다.');
+      if (p2c > 10000000) throw new Error(`반복 횟수(p2c=${p2c.toLocaleString()})가 비정상적으로 큽니다 — 토큰을 확인하세요.`);
+      const salt = concat(utf8(alg), Uint8Array.of(0), b64decode(header.p2s));
+      const pk = await subtle().importKey('raw', utf8(o.key), 'PBKDF2', false, ['deriveBits']);
+      const kek = new Uint8Array(await subtle().deriveBits({ name: 'PBKDF2', salt, iterations: p2c, hash }, pk, bits));
+      cek = await aesKwUnwrap(kek, b64decode(ek64), '키 래핑을 풀 수 없습니다 — 비밀번호가 맞지 않습니다.');
+    } else return `${head}\n✗ 지원하지 않는 키 관리 방식입니다: ${alg}\n(지원: dir, RSA-OAEP(-256), A128/192/256KW, ECDH-ES(+A128/192/256KW), PBES2-HS256/384/512+A128/192/256KW)`;
     if (cek.length !== e.len) throw new Error(`${enc}에는 ${e.len} B 콘텐츠 키가 필요한데 ${cek.length} B입니다.`);
     const aad = utf8(h64), iv = b64decode(iv64), ct = b64decode(ct64), tag = b64decode(tag64);
     let pt;
@@ -489,12 +544,12 @@
         run: (s, o) => (s.trim() ? jwtCrack(s, o) : ''),
       },
       {
-        id: 'jwe', name: 'JWE 복호화', short: '암호화된 JWT · dir · RSA-OAEP · AES-KW',
-        desc: '점이 4개인 암호화된 토큰(JWE)을 복호화합니다. 키 관리 방식 dir·RSA-OAEP(-256)·A128/192/256KW와 콘텐츠 암호화 A*GCM·A*CBC-HS*를 지원하며, 키 없이 넣으면 헤더만 보여줍니다.',
+        id: 'jwe', name: 'JWE 복호화', short: '암호화된 JWT · RSA · AES-KW · ECDH-ES · PBES2',
+        desc: '점이 4개인 암호화된 토큰(JWE)을 복호화합니다. 키 관리 방식 dir·RSA-OAEP(-256)·A128/192/256KW·ECDH-ES(+AES-KW)·PBES2와 콘텐츠 암호화 A*GCM·A*CBC-HS*를 지원하며, 키 없이 넣으면 헤더만 보여줍니다. ECDH-ES는 P-256/384/521·X25519 수신자 개인키를, PBES2는 비밀번호를 넣으세요.',
         slow: true,
         modes: [{ id: 'run', label: '복호화', inLabel: 'JWE', outLabel: '복호화 결과', placeholder: 'eyJhbGciOiJSU0EtT0FFUC0yNTYi… (5개 부분)' }],
         options: [
-          { id: 'key', label: '키', type: 'textarea', default: '', wide: true, placeholder: 'RSA: 개인키 PEM/JWK · dir/AES-KW: 대칭키 또는 {"kty":"oct","k":"…"}' },
+          { id: 'key', label: '키 / 비밀번호', type: 'textarea', default: '', wide: true, placeholder: 'RSA·ECDH-ES: 개인키 PEM/JWK · dir/AES-KW: 대칭키 또는 {"kty":"oct","k":"…"} · PBES2: 비밀번호' },
           { id: 'keyFmt', label: '대칭키 형식', type: 'select', default: 'base64', choices: [['base64', 'Base64 / Base64URL'], ['hex', '16진수'], ['text', '텍스트']] },
         ],
         run: (s, o) => jweDecrypt(s, o),
@@ -537,6 +592,6 @@
         run: (s) => samlDecode(s),
       },
     ],
-    planned: [['JWE ECDH-ES · PBES2', '추가 키 관리 방식']],
+    planned: [],
   });
 })(globalThis.DecryptLab);

@@ -22,9 +22,9 @@ Web Crypto(SHA·HMAC·RSA 등)는 `localhost`나 HTTPS에서만 동작하므로 
 | 고전 암호 | 빈도 분석·키 추정, 카이사르, ROT13/47, Atbash, Affine, 단일 치환, 비즈네르, Beaufort, Autokey, Playfair, Hill, Polybius, Bifid, ADFGVX, 열 전치, 레일펜스, Bacon, XOR, 모스 | — |
 | 대칭키 암호 | AES·ARIA·SEED (ECB·CBC·CTR·CFB·OFB·GCM, 5종 패딩), ChaCha20-Poly1305, OpenSSL·CryptoJS 호환, RC4 | — |
 | 공개키 암호·서명 | RSA-OAEP, 전자서명(ECDSA·Ed25519·RSA-PSS·PKCS#1), 키 교환(X25519·ECDH), 교과서 RSA(CTF) | — |
-| 해시·MAC·KDF | 해시(MD5·SHA-1/2·SHA-3·Keccak·BLAKE2·RIPEMD-160·SM3·CRC16/32/32C/64·Adler-32·FNV·xxHash·MurmurHash3), SHAKE, HMAC, PBKDF2·scrypt·HKDF | BLAKE3·Whirlpool, bcrypt·Argon2 |
-| 압축·데이터 복원 | Gzip·Zlib·Raw DEFLATE 압축/해제, LZ4 해제, 압축 형식 식별, ZIP 목록·추출, Brotli·Zstd 해제(브라우저가 지원할 때만 표시) | LZMA·XZ·Bzip2 |
-| 웹 토큰·인증서 | JWT 디코더, JWT 서명 검증·생성(HS·RS·PS·ES·EdDSA), JWT 서명키 사전 공격(HS256/384/512), JWE 복호화(dir·RSA-OAEP·AES-KW / GCM·CBC-HS), JWK↔PEM, PEM·DER·ASN.1 뷰어, X.509 인증서, SAML 디코더 | JWE ECDH-ES·PBES2 |
+| 해시·MAC·KDF | 해시(MD5·SHA-1/2·SHA-3·Keccak·BLAKE2·BLAKE3·RIPEMD-160·SM3·Whirlpool·CRC16/32/32C/64·Adler-32·FNV·xxHash·MurmurHash3), 가변 길이 해시(SHAKE·BLAKE3), HMAC, PBKDF2·scrypt·HKDF, 비밀번호 해시(bcrypt·Argon2id/i/d 생성·검증) | — |
+| 압축·데이터 복원 | Gzip·Zlib·Raw DEFLATE 압축/해제, XZ·LZMA·Bzip2 해제, LZ4 해제, 압축 형식 식별, ZIP 목록·추출, Brotli·Zstd 해제(브라우저가 지원할 때만 표시) | — |
+| 웹 토큰·인증서 | JWT 디코더, JWT 서명 검증·생성(HS·RS·PS·ES·EdDSA), JWT 서명키 사전 공격(HS256/384/512), JWE 복호화(dir·RSA-OAEP·AES-KW·ECDH-ES·PBES2 / GCM·CBC-HS), JWK↔PEM, PEM·DER·ASN.1 뷰어, X.509 인증서, SAML 디코더 | — |
 | 바이너리 분석 | 헥스 뷰어, 파일 시그니처 판별, 엔트로피 분석, 문자열 추출, XOR 전수 조사, Data URI 분석 | — |
 
 ## 검증
@@ -32,7 +32,9 @@ Web Crypto(SHA·HMAC·RSA 등)는 `localhost`나 HTTPS에서만 동작하므로 
 - AES·ARIA는 6개 운용 모드 전부를 Node.js(OpenSSL)와 바이트 단위로 비교했습니다. SEED는 `openssl enc -seed-cbc`와, ChaCha20-Poly1305는 Node와 비교했습니다.
 - FIPS-197, RFC 8439, KISA SEED, ARIA 공식 테스트 벡터를 확인했습니다.
 - 해시·HMAC·PBKDF2·HKDF·SHA-3·SHAKE·BLAKE2는 Node `crypto`와 결과를 비교했고, 여러 블록에 걸치는 경계 길이도 확인했습니다. RIPEMD-160·SM3·scrypt도 Node와 비교했고, CRC·Adler·FNV·xxHash·MurmurHash3는 표준 검사값으로 확인했습니다.
-- 압축은 Node `zlib`과 `gzip`·`zip` 명령으로 만든 파일로, X.509·ASN.1은 `openssl req`로 만든 인증서와 지문으로, JWT·JWK·JWE는 Node가 만든 키·서명·암호문으로 상호 검증했습니다. LZ4는 `lz4` 명령으로 만든 파일로 확인했습니다.
+- BLAKE3·Whirlpool과 비밀번호 해시 bcrypt·Argon2(id/i/d)는 `hash-wasm`(및 bcrypt는 `bcryptjs`)과 여러 입력·파라미터·출력 길이에서 대조했고, BLAKE3는 경계 길이와 XOF, Concat KDF는 RFC 7518 벡터, Argon2 PHC 문자열은 `hash-wasm` 출력과 일치함을 확인했습니다.
+- 압축은 Node `zlib`과 `gzip`·`zip` 명령으로 만든 파일로, X.509·ASN.1은 `openssl req`로 만든 인증서와 지문으로, JWT·JWK·JWE는 Node가 만든 키·서명·암호문으로 상호 검증했습니다. LZ4는 `lz4` 명령으로, XZ·LZMA·Bzip2 해제는 `xz`·`bzip2` 명령으로 만든 파일(빈 입력·단일 바이트·다중 블록 포함)로 확인했습니다.
+- JWE의 ECDH-ES(+AES-KW, P-256/384/521·X25519)와 PBES2(HS256/384/512+A128/192/256KW)는 `jose`가 만든 토큰을 모든 콘텐츠 암호화(GCM·CBC-HS) 조합에서 복호화해 확인했습니다.
 - RSA·ECDSA 키와 서명은 Node가 만든 키 및 검증 결과와 상호 호환됩니다.
 - 동기 SHA-256/384/512와 HMAC(서명키 사전 공격용)은 여러 길이에서 Node와 일치하며, 찾은 키는 서명 검증 도구로 교차 확인했습니다.
 - 고전 암호는 위키백과 예제값으로 확인했습니다.
