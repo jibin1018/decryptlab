@@ -376,7 +376,72 @@
     return `✓ 복호화 성공 (alg ${alg} · enc ${enc})\n\n${head}\n// Payload\n${body}${note}`;
   }
 
-  Object.assign(DL.fn, { jweDecrypt, jwtDecode, jwtVerify, jwtSign, asn1Tree, x509Report, jwkToPem, pemToJwk, samlDecode, OIDS });
+  /* ---------- HS* 서명키 사전 공격 (HMAC 비밀키 복구) ---------- */
+  // 튜토리얼·라이브러리 기본값과 흔한 약한 키. 실습용 토큰은 대부분 여기서 걸린다.
+  const COMMON_SECRETS = ['', 'secret', 'your-256-bit-secret', 'your-384-bit-secret', 'your-512-bit-secret', 'secretkey',
+    'secret123', 'password', 'password123', 'changeme', 'admin', 'administrator', 'root', 'toor', 'key', 'jwt', 'jwtsecret',
+    'jwt-secret', 'mysecret', 'my-secret', 'my-secret-key', 'supersecret', 'super-secret', 's3cr3t', 'topsecret', 'test',
+    'testing', 'dev', 'development', 'production', 'staging', 'default', 'example', 'demo', 'qwerty', '123456', '12345678',
+    '1234567890', 'letmein', 'welcome', 'access', 'token', 'signature', 'hmac', 'shhhh', 'secretpassword', 'P@ssw0rd', 'HS256'];
+  const SUFFIXES = ['', '1', '12', '123', '1234', '12345', '!', '!!', '123!', '@', '#', '$', '_', '2022', '2023', '2024', '2025', '01', '00', '007', '69', '420', '2020'];
+  function mangle(word) {
+    const out = [];
+    const bases = word ? [...new Set([word, word.toLowerCase(), word.toUpperCase(), word.charAt(0).toUpperCase() + word.slice(1)])] : [''];
+    for (const b of bases) for (const s of SUFFIXES) out.push(b + s);
+    return out;
+  }
+  const CHARSETS = { lower: 'abcdefghijklmnopqrstuvwxyz', alnum: 'abcdefghijklmnopqrstuvwxyz0123456789', digits: '0123456789', loweralpha: 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ' };
+  function jwtCrack(token, o) {
+    const parts = token.trim().split('.');
+    if (parts.length !== 3) throw new Error('header.payload.signature 형식의 JWT여야 합니다.');
+    let header;
+    try { header = JSON.parse(utf8Decode(b64decode(parts[0]), true)); } catch { throw new Error('헤더를 해석할 수 없습니다.'); }
+    const alg = String(header.alg || '').toUpperCase();
+    const variant = { HS256: 256, HS384: 384, HS512: 512 }[alg];
+    if (!variant) throw new Error(`HMAC 기반 토큰(HS256/384/512)만 지원합니다. 이 토큰의 alg는 "${header.alg || '없음'}"입니다. RS/ES/EdDSA는 공개키 암호라 사전 공격 대상이 아닙니다.`);
+    const input = utf8(`${parts[0]}.${parts[1]}`);
+    const target = b64decode(parts[2]);
+    if (!target.length) throw new Error('서명(세 번째 부분)이 비어 있습니다.');
+    const hit = (secret) => { const sig = DL.hmacSync(variant, utf8(secret), input); return sig.length === target.length && sig.every((v, i) => v === target[i]); };
+
+    const LIMIT = 3000000; // 브라우저가 멈추지 않도록 시도 상한
+    let tried = 0;
+    const seen = new Set();
+    const found = (secret) => `✓ 서명키를 찾았습니다! (${tried.toLocaleString()}개 시도 · alg ${alg})\n\n키: ${secret === '' ? '(빈 문자열)' : secret}\n길이: ${utf8(secret).length} B\n\n이 키로 토큰을 위조하거나 서명을 변조할 수 있습니다. 실제 서비스라면 32바이트 이상 무작위 키로 즉시 교체하세요.`;
+    const tryAll = (cands) => {
+      for (const s of cands) {
+        if (seen.has(s)) continue;
+        seen.add(s); tried++;
+        if (hit(s)) return s;
+        if (tried >= LIMIT) throw new Error(`시도 상한(${LIMIT.toLocaleString()}개)에 도달했습니다. 범위를 좁히거나, 큰 사전은 아래 hashcat을 쓰세요.`);
+      }
+      return null;
+    };
+
+    const words = [];
+    if (o.useCommon !== false) words.push(...COMMON_SECRETS);
+    for (const line of (o.wordlist || '').split('\n')) { const w = line.replace(/\r$/, ''); if (w !== '' || !words.includes('')) words.push(w); }
+    for (const w of words) { const r = tryAll(o.mangle ? mangle(w) : [w]); if (r !== null) return found(r); }
+
+    if (o.brute) {
+      const charset = CHARSETS[o.charset] || CHARSETS.lower;
+      const maxLen = Math.min(Math.max(1, Number(o.maxLen) || 4), 6);
+      for (let L = 1; L <= maxLen; L++) {
+        const idx = new Array(L).fill(0);
+        for (;;) {
+          let s = ''; for (let i = 0; i < L; i++) s += charset[idx[i]];
+          seen.add(s); tried++;
+          if (hit(s)) return found(s);
+          if (tried >= LIMIT) throw new Error(`시도 상한(${LIMIT.toLocaleString()}개, 길이 ${L}까지)에 도달했습니다. 더 긴 키는 hashcat을 쓰세요.`);
+          let p = L - 1; while (p >= 0) { if (++idx[p] < charset.length) break; idx[p] = 0; p--; }
+          if (p < 0) break;
+        }
+      }
+    }
+    return `✗ ${tried.toLocaleString()}개 후보에서 찾지 못했습니다. (alg ${alg})\n\n키가 사전에 없거나, 무작위로 생성된 강한 키일 수 있습니다. 더 큰 사전(rockyou 등)이나 본격적인 무차별 대입은 GPU 기반 오프라인 도구가 훨씬 빠릅니다:\n\n  hashcat -a 0 -m 16500 token.txt wordlist.txt      # 사전\n  hashcat -a 3 -m 16500 token.txt ?l?l?l?l?l?l       # 소문자 6자 무차별\n  john --format=HMAC-SHA${variant === 256 ? '256' : variant} token.txt    # John the Ripper\n\n(-m 16500 = JWT HS256/384/512)\n\n32바이트 이상 무작위 키는 사실상 복구할 수 없습니다 — 이 경우 키를 발급한 설정 파일·환경 변수·시크릿 매니저에서 직접 찾는 편이 빠릅니다.`;
+  }
+
+  Object.assign(DL.fn, { jwtCrack, jweDecrypt, jwtDecode, jwtVerify, jwtSign, asn1Tree, x509Report, jwkToPem, pemToJwk, samlDecode, OIDS });
 
   const KEY_TEXTAREA = { id: 'key', label: '키', type: 'textarea', default: '', wide: true, placeholder: 'HS*: 비밀키 문자열 · RS/PS/ES/EdDSA: PEM 또는 JWK' };
 
@@ -407,6 +472,21 @@
         ],
         verify: (s, o) => jwtVerify(s, o),
         sign: (s, o) => jwtSign(s, o),
+      },
+      {
+        id: 'jwtcrack', name: 'JWT 서명키 찾기', short: 'HS256/384/512 비밀키 사전 공격',
+        desc: '본인 소유·실습용 HS* 토큰의 잊어버린 비밀키를 찾습니다. 내장 약한 키 목록과 변형, 직접 넣은 단어 목록, 선택적 짧은 무차별 대입으로 서명이 맞는 키를 탐색합니다. 모든 계산은 브라우저 안에서만 이루어지며, 강한 무작위 키는 복구되지 않습니다. 남의 토큰 키를 알아내는 용도로 쓰지 마세요.',
+        slow: true,
+        modes: [{ id: 'run', label: '키 찾기', inLabel: 'JWT (HS256/384/512)', outLabel: '결과', placeholder: 'eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.…' }],
+        options: [
+          { id: 'useCommon', label: '내장 약한 키 목록 사용', type: 'checkbox', default: true },
+          { id: 'mangle', label: '변형 추가 (대소문자·숫자·기호 붙이기)', type: 'checkbox', default: true },
+          { id: 'wordlist', label: '단어 목록 (한 줄에 하나)', type: 'textarea', default: '', wide: true, placeholder: '후보 키를 한 줄에 하나씩 붙여 넣으세요 (선택)' },
+          { id: 'brute', label: '짧은 무차별 대입도 시도', type: 'checkbox', default: false },
+          { id: 'charset', label: '문자셋', type: 'select', default: 'lower', when: (o) => o.brute, choices: [['lower', '소문자 (a–z)'], ['digits', '숫자 (0–9)'], ['alnum', '소문자+숫자'], ['loweralpha', '대소문자']] },
+          { id: 'maxLen', label: '최대 길이', type: 'number', default: 4, min: 1, max: 6, when: (o) => o.brute },
+        ],
+        run: (s, o) => (s.trim() ? jwtCrack(s, o) : ''),
       },
       {
         id: 'jwe', name: 'JWE 복호화', short: '암호화된 JWT · dir · RSA-OAEP · AES-KW',
