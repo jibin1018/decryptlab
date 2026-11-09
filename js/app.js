@@ -18,8 +18,30 @@
   const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
   const pad2 = (n) => String(n).padStart(2, '0');
   const store = {
+    get(k) { try { return localStorage.getItem(k); } catch { return null; } },
     set(k, v) { try { localStorage.setItem(k, v); } catch { /* 저장 불가 환경 */ } },
   };
+
+  // 새로고침해도 입력·선택한 옵션·모드가 그대로 남도록 로컬에 저장/복원한다.
+  // (모두 이 브라우저 안에만 저장되며 외부로 전송되지 않는다. 열어 둔 파일은 저장하지 않는다.)
+  const STATE_KEY = 'dl-state';
+  (function restoreState() {
+    try {
+      const saved = JSON.parse(store.get(STATE_KEY) || '{}');
+      if (typeof saved.input === 'string') state.input = saved.input;
+      if (saved.options && typeof saved.options === 'object') state.options = saved.options;
+      if (saved.toolMode && typeof saved.toolMode === 'object') state.toolMode = saved.toolMode;
+    } catch { /* 저장된 상태 없음/손상 */ }
+  })();
+  let persistTimer;
+  function persist() {
+    clearTimeout(persistTimer);
+    persistTimer = setTimeout(() => {
+      // 지나치게 큰 입력은 저장하지 않는다 (localStorage 한도 보호).
+      const input = state.input.length > 200000 ? '' : state.input;
+      store.set(STATE_KEY, JSON.stringify({ input, options: state.options, toolMode: state.toolMode }));
+    }, 200);
+  }
 
   /* ---------- 모드·옵션 ---------- */
   const DEFAULT_MODES = [{ id: 'encode', label: '인코딩' }, { id: 'decode', label: '디코딩' }];
@@ -243,7 +265,7 @@
 
     if ($in) {
       $in.value = useFile ? `[파일] ${state.file.name} (${state.file.bytes.length.toLocaleString()} B)\n\n지우기를 누르면 텍스트 입력으로 돌아갑니다.` : state.input;
-      $in.addEventListener('input', () => { state.input = $in.value; run(); });
+      $in.addEventListener('input', () => { state.input = $in.value; persist(); run(); });
     }
 
     // 양방향: 출력칸을 직접 고치면 반대 모드로 변환해 입력칸을 채운다.
@@ -259,6 +281,7 @@
     app.querySelectorAll('[data-mode]').forEach((b) => b.addEventListener('click', () => {
       if (b.dataset.mode === mode.id) return;
       state.toolMode[tool.id] = b.dataset.mode;
+      persist();
       renderWorkspace(cat, tool);
       const i = app.querySelector('#input'); if (i) i.focus();
     }));
@@ -268,6 +291,7 @@
       const discrete = el.type === 'checkbox' || el.tagName === 'SELECT';
       el.addEventListener(discrete ? 'change' : 'input', () => {
         opts[el.dataset.opt] = el.type === 'checkbox' ? el.checked : el.value;
+        persist();
         // 다른 옵션의 표시 여부가 바뀔 수 있으면 다시 그린다 (텍스트 입력은 포커스 유지를 위해 제외)
         if (discrete && hasConditional) { renderWorkspace(cat, tool); return; }
         if (!mode.noInput) run();
@@ -277,12 +301,13 @@
     const clear = app.querySelector('#clear-btn');
     if (clear) clear.addEventListener('click', () => {
       if (state.file && tool.fileInput) { state.file = null; renderWorkspace(cat, tool); return; }
-      state.input = ''; $in.value = ''; $in.focus(); run(true);
+      state.input = ''; persist(); $in.value = ''; $in.focus(); run(true);
     });
     const paste = app.querySelector('#paste-btn');
     if (paste) paste.addEventListener('click', async () => {
       try {
         state.input = await navigator.clipboard.readText();
+        persist();
         if (state.file && tool.fileInput) { state.file = null; renderWorkspace(cat, tool); return; }
         $in.value = state.input; run(true);
       } catch { toast('클립보드를 읽을 수 없습니다. 직접 붙여넣어 주세요.'); $in.focus(); }
@@ -382,6 +407,7 @@
       if (id !== runId) return;
       $in.value = text;
       state.input = text;
+      persist();
       const $inCount = app.querySelector('#in-count');
       if ($inCount) $inCount.textContent = text ? `${Array.from(text).length.toLocaleString()}자 · ${utf8(text).length.toLocaleString()} B` : '';
       setStatus(msg, cls);
@@ -428,6 +454,33 @@
     root.dataset.theme = next;
     store.set('dl-theme', next);
   });
+
+  /* ---------- 맨 위로 스크롤 버튼 ---------- */
+  (function scrollTopButton() {
+    const btn = document.createElement('button');
+    btn.className = 'scroll-top';
+    btn.type = 'button';
+    btn.setAttribute('aria-label', '맨 위로');
+    btn.title = '맨 위로';
+    btn.innerHTML = '<svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" d="M6 14l6-6 6 6"/></svg>';
+    // 일부 환경에서 window의 behavior:'smooth'가 동작하지 않아 직접 애니메이션으로 올린다.
+    btn.addEventListener('click', () => {
+      const start = window.scrollY || document.documentElement.scrollTop || 0;
+      if (start <= 0) return;
+      const t0 = performance.now(), dur = 320;
+      const step = (now) => {
+        const p = Math.min(1, (now - t0) / dur);
+        const ease = 1 - Math.pow(1 - p, 3);
+        window.scrollTo(0, Math.round(start * (1 - ease)));
+        if (p < 1) requestAnimationFrame(step);
+      };
+      requestAnimationFrame(step);
+    });
+    document.body.appendChild(btn);
+    const toggle = () => btn.classList.toggle('show', window.scrollY > 300);
+    window.addEventListener('scroll', toggle, { passive: true });
+    toggle();
+  })();
 
   window.addEventListener('hashchange', render);
   render();
