@@ -77,7 +77,6 @@
       <a class="topic-card accent-${c.color}${soon ? ' soon' : ''}" href="#/${c.id}">
         ${soon ? '<span class="badge">준비 중</span>' : ''}
         <h2>${esc(c.name)}</h2>
-        <p>${esc(c.desc)}</p>
         <div class="meta">${meta}</div>
       </a>`;
   }
@@ -103,7 +102,7 @@
     app.innerHTML = `
       <main class="home">
         <h1>무엇을 풀어볼까요?</h1>
-        <p class="lead">주제를 고르면 왼쪽에 도구 목차가 열립니다. 모든 변환은 브라우저 안에서만 처리되며, 입력한 키와 데이터는 어디에도 전송되지 않습니다.</p>
+        <p class="lead">인코딩·고전 암호·대칭/공개키·해시·압축·토큰 — 모두 브라우저 안에서 처리됩니다.</p>
         <div class="search">
           <input id="search" type="search" placeholder="도구 검색 — 예: base64, aes, 비즈네르, jwt" value="${esc(state.query)}" autocomplete="off" aria-label="도구 검색">
           <span class="total">${total}개 도구</span>
@@ -123,7 +122,7 @@
     return `
       <aside class="sidebar" aria-label="${esc(cat.name)} 목차">
         <a class="back" href="#/">← 전체 주제</a>
-        <div class="side-head"><h2>${esc(cat.name)}</h2><p>${esc(cat.desc)}</p></div>
+        <div class="side-head"><h2>${esc(cat.name)}</h2></div>
         <nav class="toc">
           ${cat.tools.map((t, i) => `
             <a class="toc-item" href="#/${cat.id}/${t.id}" ${t === tool ? 'aria-current="page"' : ''}>
@@ -170,7 +169,6 @@
       <main class="panel">
         <div class="crumb">${esc(cat.name)}</div>
         <h1>준비 중입니다</h1>
-        <p class="tool-desc">${esc(cat.desc)}</p>
         <div class="soon-box">
           <h3>추가될 도구</h3>
           <ul>${(cat.planned || []).map(([n, s]) => `<li><b>${esc(n)}</b><span>${esc(s)}</span></li>`).join('')}</ul>
@@ -191,6 +189,9 @@
     const opts = optionValues(tool);
     const useFile = tool.fileInput && state.file;
     const swappable = modes.length === 2 && !modes.some((m) => m.noInput);
+    // 가역 2모드 도구는 양쪽을 모두 편집할 수 있게 하고, 한쪽을 고치면 반대 모드로 변환한다.
+    const twoWay = swappable && !useFile;
+    const oppMode = twoWay ? modes.find((m) => m !== mode) : null;
 
     app.innerHTML = `
       <div class="workspace accent-${cat.color}">
@@ -198,7 +199,6 @@
         <main class="panel">
           <div class="crumb">${esc(cat.name)}</div>
           <h1>${esc(tool.name)}</h1>
-          <p class="tool-desc">${esc(tool.desc)}</p>
 
           <div class="controls">
             ${modes.length > 1 ? `
@@ -227,11 +227,11 @@
               <div class="pane-head">
                 <span class="pane-title">${esc(outLabel)}<span class="count" id="out-count"></span></span>
                 <div class="pane-actions">
-                  ${swappable ? '<button class="btn" type="button" id="swap-btn" title="결과를 입력으로 옮기고 동작을 바꿉니다">⇄ 입력으로</button>' : ''}
+                  ${swappable && !twoWay ? '<button class="btn" type="button" id="swap-btn" title="결과를 입력으로 옮기고 동작을 바꿉니다">⇄ 입력으로</button>' : ''}
                   <button class="btn" type="button" id="copy-btn">복사</button>
                 </div>
               </div>
-              <textarea id="output" readonly spellcheck="false" aria-label="${esc(outLabel)}" aria-live="polite"></textarea>
+              <textarea id="output" spellcheck="false" autocomplete="off" aria-label="${esc(outLabel)}" ${twoWay ? `placeholder="여기에 ${esc(outLabel)}을 입력하면 반대로 변환됩니다"` : 'readonly aria-live="polite"'}></textarea>
               <div class="status" id="status" role="status"></div>
             </section>
           </div>
@@ -244,6 +244,16 @@
     if ($in) {
       $in.value = useFile ? `[파일] ${state.file.name} (${state.file.bytes.length.toLocaleString()} B)\n\n지우기를 누르면 텍스트 입력으로 돌아갑니다.` : state.input;
       $in.addEventListener('input', () => { state.input = $in.value; run(); });
+    }
+
+    // 양방향: 출력칸을 직접 고치면 반대 모드로 변환해 입력칸을 채운다.
+    if (twoWay && oppMode) {
+      const $out = app.querySelector('#output');
+      $out.addEventListener('input', () => {
+        clearTimeout(debounceTimer);
+        if (!tool.slow) convertReverse(tool, oppMode);
+        else { runId++; setStatus('계산 중…'); debounceTimer = setTimeout(() => convertReverse(tool, oppMode), 350); }
+      });
     }
 
     app.querySelectorAll('[data-mode]').forEach((b) => b.addEventListener('click', () => {
@@ -353,7 +363,38 @@
           // 바이트 결과는 UTF-8로 해석하고, 실패하면 16진수로 보여준다.
           try { show(utf8Decode(res, true), `${res.length.toLocaleString()} B 처리 완료`, 'ok'); }
           catch { show(toHex(res, false, ' '), `유효한 UTF-8 텍스트가 아니어서 ${res.length.toLocaleString()} B를 16진수로 표시합니다.`, 'warn'); }
-        } else show(String(res ?? ''), '');
+        } else if (res && typeof res === 'object' && 'text' in res) show(String(res.text ?? ''), res.note || '', res.cls || '');
+        else show(String(res ?? ''), '');
+      })
+      .catch((err) => show('', `⚠ ${err && err.message ? err.message : '처리할 수 없는 입력입니다.'}`, 'error'));
+  }
+
+  // 출력칸 → 입력칸 역방향 변환 (양방향 도구 전용)
+  function convertReverse(tool, oppMode) {
+    const id = ++runId;
+    const $out = app.querySelector('#output');
+    const $in = app.querySelector('#input');
+    if (!$out || !$in) return;
+    const src = $out.value;
+    const $outCount = app.querySelector('#out-count');
+    if ($outCount) $outCount.textContent = src ? `${Array.from(src).length.toLocaleString()}자` : '';
+    const show = (text, msg = '', cls = '') => {
+      if (id !== runId) return;
+      $in.value = text;
+      state.input = text;
+      const $inCount = app.querySelector('#in-count');
+      if ($inCount) $inCount.textContent = text ? `${Array.from(text).length.toLocaleString()}자 · ${utf8(text).length.toLocaleString()} B` : '';
+      setStatus(msg, cls);
+    };
+    if (!src) { show('', '반대쪽에 입력하면 변환됩니다.'); return; }
+    Promise.resolve()
+      .then(() => tool[oppMode.id](src, optionValues(tool)))
+      .then((res) => {
+        if (res instanceof Uint8Array) {
+          try { show(utf8Decode(res, true), '', 'ok'); }
+          catch { show(toHex(res, false, ' '), '유효한 UTF-8 텍스트가 아니어서 16진수로 표시합니다.', 'warn'); }
+        } else if (res && typeof res === 'object' && 'text' in res) show(String(res.text ?? ''), res.note || '', res.cls || '');
+        else show(String(res ?? ''), '');
       })
       .catch((err) => show('', `⚠ ${err && err.message ? err.message : '처리할 수 없는 입력입니다.'}`, 'error'));
   }

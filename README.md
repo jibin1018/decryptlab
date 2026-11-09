@@ -45,19 +45,25 @@ Web Crypto(SHA·HMAC·RSA 등)는 `localhost`나 HTTPS에서만 동작하므로 
 - `index.html`: 진입점. 스크립트 순서가 곧 카테고리 순서입니다.
 - `css/style.css`: 스타일(라이트/다크 테마)
 - `js/core.js`: 공통 기능(바이트 변환, 입출력 형식, PEM, ASN.1 DER, MD5·CRC32, 카테고리 레지스트리)
-- `js/tools/*.js`: 카테고리별 도구 정의. 하나의 파일이 `DL.addCategory()`로 카테고리 하나를 등록합니다.
+- `js/tools/<카테고리>/`: 카테고리마다 폴더 하나. `_<카테고리>.js`가 카테고리(빈 도구 목록)와 여러 도구가 공유하는 헬퍼(`DL.kits.<카테고리>`)를 등록하고, 나머지 파일이 도구 하나씩을 `DL.addTool('<카테고리>', …)`로 추가합니다. `index.html`의 스크립트 순서(`_카테고리.js` → 각 도구 파일)가 곧 목차 순서입니다.
 - `js/app.js`: 해시 라우팅(`#/카테고리/도구`)과 화면 렌더링
 
 ### 도구 추가하기
 
+해당 카테고리 폴더에 파일 하나를 만들고 `DL.addTool('<카테고리>', { … })`로 도구를 등록한 뒤, `index.html`에 원하는 위치(목차 순서)로 `<script>`를 추가합니다. 여러 도구가 쓰는 헬퍼는 `_<카테고리>.js`의 `DL.kits.<카테고리>`에서 가져옵니다.
+
 ```js
-{
-  id: 'example', name: '예시', short: '목차에 표시될 짧은 설명', desc: '본문 설명',
-  modes: [{ id: 'encrypt', label: '암호화' }, { id: 'decrypt', label: '복호화' }], // 생략 시 인코딩/디코딩
-  options: [{ id: 'key', label: '키', type: 'text', default: '', when: (o) => true }],
-  encrypt: (input, opts) => '문자열 · Uint8Array · Promise 반환',
-  decrypt: (input, opts) => '…',
-}
+(function (DL) {
+  'use strict';
+  // const { helper } = DL.kits.classic;  // 필요하면 공유 헬퍼 사용
+  DL.addTool('classic', {
+    id: 'example', name: '예시', short: '목차에 표시될 짧은 설명', desc: '본문 설명',
+    modes: [{ id: 'encrypt', label: '암호화' }, { id: 'decrypt', label: '복호화' }], // 생략 시 인코딩/디코딩
+    options: [{ id: 'key', label: '키', type: 'text', default: '', when: (o) => true }],
+    encrypt: (input, opts) => '문자열 · Uint8Array · Promise 반환',
+    decrypt: (input, opts) => '…',
+  });
+})(globalThis.DecryptLab);
 ```
 
-아직 만들지 않은 도구는 카테고리의 `planned: [['이름', '설명'], …]`에 넣으면 화면에 "준비 중"으로 표시됩니다.
+여러 도구가 공유하는 함수는 `_<카테고리>.js`에서 정의해 `DL.kits.<카테고리>`로 내보냅니다. 새 카테고리는 `_<카테고리>.js`에서 `DL.addCategory({ id, name, desc, color, tools: [] })`로 먼저 등록합니다. 아직 만들지 않은 도구는 카테고리의 `planned: [['이름', '설명'], …]`에 넣으면 화면에 "준비 중"으로 표시됩니다.

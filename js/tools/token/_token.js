@@ -1,0 +1,520 @@
+/* 웹 토큰·인증서 — 카테고리 셸 + 공유 헬퍼 (DL.kits.token)
+ * ASN.1·OID·JWT·JWK·JWE·SAML 공용 로직을 모은다.
+ * jwt/jwtverify/jwtcrack/jwe/jwk/asn1/x509/saml 도구는 개별 파일에서 등록한다.
+ */
+(function (DL) {
+  'use strict';
+  const { utf8, utf8Decode, b64decode, b64encode, toHex, fromPem, toPem, asn1Parse, oidToString, bigFromBytes, subtle, readBytes, fmtOption, latin1, concat } = DL;
+  const b64url = (b) => b64encode(b, { urlsafe: true, nopad: true });
+
+  /* ---------- OID 이름 ---------- */
+  const OIDS = {
+    '1.2.840.113549.1.1.1': 'rsaEncryption', '1.2.840.113549.1.1.5': 'sha1WithRSAEncryption', '1.2.840.113549.1.1.11': 'sha256WithRSAEncryption',
+    '1.2.840.113549.1.1.12': 'sha384WithRSAEncryption', '1.2.840.113549.1.1.13': 'sha512WithRSAEncryption', '1.2.840.113549.1.1.10': 'RSASSA-PSS',
+    '1.2.840.113549.1.1.7': 'RSAES-OAEP', '1.2.840.113549.1.1.4': 'md5WithRSAEncryption',
+    '1.2.840.10045.2.1': 'ecPublicKey', '1.2.840.10045.3.1.7': 'P-256 (prime256v1)', '1.3.132.0.34': 'P-384 (secp384r1)', '1.3.132.0.35': 'P-521 (secp521r1)', '1.3.132.0.10': 'secp256k1',
+    '1.2.840.10045.4.3.2': 'ecdsa-with-SHA256', '1.2.840.10045.4.3.3': 'ecdsa-with-SHA384', '1.2.840.10045.4.3.4': 'ecdsa-with-SHA512',
+    '1.3.101.112': 'Ed25519', '1.3.101.113': 'Ed448', '1.3.101.110': 'X25519', '1.3.101.111': 'X448',
+    '2.5.4.3': 'CN', '2.5.4.6': 'C', '2.5.4.7': 'L', '2.5.4.8': 'ST', '2.5.4.9': 'street', '2.5.4.10': 'O', '2.5.4.11': 'OU', '2.5.4.5': 'serialNumber',
+    '2.5.4.4': 'SN', '2.5.4.42': 'GN', '2.5.4.12': 'title', '1.2.840.113549.1.9.1': 'emailAddress', '0.9.2342.19200300.100.1.25': 'DC',
+    '2.5.29.14': 'subjectKeyIdentifier', '2.5.29.15': 'keyUsage', '2.5.29.17': 'subjectAltName', '2.5.29.18': 'issuerAltName', '2.5.29.19': 'basicConstraints',
+    '2.5.29.31': 'cRLDistributionPoints', '2.5.29.32': 'certificatePolicies', '2.5.29.35': 'authorityKeyIdentifier', '2.5.29.37': 'extKeyUsage',
+    '1.3.6.1.5.5.7.1.1': 'authorityInfoAccess', '1.3.6.1.5.5.7.48.1': 'OCSP', '1.3.6.1.5.5.7.48.2': 'caIssuers',
+    '1.3.6.1.5.5.7.3.1': 'serverAuth (TLS 서버)', '1.3.6.1.5.5.7.3.2': 'clientAuth (TLS 클라이언트)', '1.3.6.1.5.5.7.3.3': 'codeSigning (코드 서명)',
+    '1.3.6.1.5.5.7.3.4': 'emailProtection (S/MIME)', '1.3.6.1.5.5.7.3.8': 'timeStamping', '1.3.6.1.5.5.7.3.9': 'OCSPSigning',
+    '1.3.6.1.4.1.11129.2.4.2': 'CT 서명 인증서 타임스탬프', '2.23.140.1.2.1': 'DV 인증서 정책', '2.23.140.1.2.2': 'OV 인증서 정책', '2.23.140.1.1': 'EV 인증서 정책',
+    '2.16.840.1.101.3.4.2.1': 'sha256', '2.16.840.1.101.3.4.2.2': 'sha384', '2.16.840.1.101.3.4.2.3': 'sha512', '1.3.14.3.2.26': 'sha1', '1.2.840.113549.2.5': 'md5',
+    '1.2.840.113549.1.7.1': 'data', '1.2.840.113549.1.7.2': 'signedData', '1.2.840.113549.1.7.3': 'envelopedData',
+    '1.2.840.113549.1.9.3': 'contentType', '1.2.840.113549.1.9.4': 'messageDigest', '1.2.840.113549.1.9.5': 'signingTime',
+    '1.2.840.113549.1.5.13': 'PBES2', '1.2.840.113549.1.5.12': 'PBKDF2', '2.16.840.1.101.3.4.1.2': 'aes128-CBC', '2.16.840.1.101.3.4.1.42': 'aes256-CBC',
+    '1.2.840.113549.2.9': 'hmacWithSHA256', '1.2.410.200004.1.4': 'SEED-CBC',
+  };
+  const oidName = (oid) => (OIDS[oid] ? `${OIDS[oid]} (${oid})` : oid);
+
+  /* ---------- ASN.1 트리 ---------- */
+  const UNIVERSAL = { 1: 'BOOLEAN', 2: 'INTEGER', 3: 'BIT STRING', 4: 'OCTET STRING', 5: 'NULL', 6: 'OBJECT IDENTIFIER', 10: 'ENUMERATED', 12: 'UTF8String', 16: 'SEQUENCE', 17: 'SET', 19: 'PrintableString', 20: 'T61String', 22: 'IA5String', 23: 'UTCTime', 24: 'GeneralizedTime', 30: 'BMPString' };
+  function parseTime(node) {
+    const s = latin1(node.value);
+    const m = node.tag === 23 ? /^(\d\d)(\d\d)(\d\d)(\d\d)(\d\d)(\d\d)?Z$/.exec(s) : /^(\d{4})(\d\d)(\d\d)(\d\d)(\d\d)(\d\d)?/.exec(s);
+    if (!m) return null;
+    let y = Number(m[1]);
+    if (node.tag === 23) y += y < 50 ? 2000 : 1900;
+    return new Date(Date.UTC(y, m[2] - 1, m[3], m[4], m[5], m[6] || 0));
+  }
+  function nodeValue(n) {
+    if (n.cls !== 0) return n.constructed ? '' : `${toHex(n.value.subarray(0, 32))}${n.len > 32 ? '…' : ''}${/^[\x20-\x7e]+$/.test(latin1(n.value)) ? `  "${latin1(n.value)}"` : ''}`;
+    switch (n.tag) {
+      case 1: return n.value[0] ? 'TRUE' : 'FALSE';
+      case 2: case 10: return n.len <= 8 ? String(bigFromBytes(n.value) - (n.value[0] & 0x80 ? 1n << BigInt(n.len * 8) : 0n)) : `${toHex(n.value.subarray(0, 24))}… (${(n.len - (n.value[0] === 0 ? 1 : 0)) * 8}비트)`;
+      case 3: return n.children ? '(내부에 DER 포함)' : `미사용 비트 ${n.value[0]} · ${toHex(n.value.subarray(1, 33))}${n.len > 33 ? '…' : ''}`;
+      case 4: if (n.children) return '(내부에 DER 포함)'; return `${toHex(n.value.subarray(0, 32))}${n.len > 32 ? '…' : ''}`;
+      case 5: return '';
+      case 6: return oidName(oidToString(n.value));
+      case 12: return utf8Decode(n.value);
+      case 30: { let s = ''; for (let i = 0; i + 1 < n.value.length; i += 2) s += String.fromCharCode((n.value[i] << 8) | n.value[i + 1]); return s; }
+      case 19: case 20: case 22: return latin1(n.value);
+      case 23: case 24: { const d = parseTime(n); return d ? d.toISOString() : latin1(n.value); }
+      default: return n.constructed ? '' : toHex(n.value.subarray(0, 32));
+    }
+  }
+  function asn1Tree(nodes, depth = 0, out = []) {
+    for (const n of nodes) {
+      const name = n.cls === 0 ? (UNIVERSAL[n.tag] || `UNIVERSAL ${n.tag}`) : n.cls === 2 ? `[${n.tag}]` : `${['', 'APPLICATION', '', 'PRIVATE'][n.cls]} ${n.tag}`;
+      const v = nodeValue(n);
+      out.push(`${String(n.offset).padStart(5)} ${'  '.repeat(depth)}${name} (${n.len})${v ? '  ' + v : ''}`);
+      if (n.children) asn1Tree(n.children, depth + 1, out);
+      if (out.length > 3000) { out.push('… (너무 길어 생략)'); break; }
+    }
+    return out;
+  }
+  function readDer(s, fmt) {
+    if (s instanceof Uint8Array) {
+      const t = latin1(s.subarray(0, 64));
+      return t.includes('-----BEGIN') ? fromPem(utf8Decode(s)) : { label: '(DER 파일)', der: s };
+    }
+    if (/-----BEGIN/.test(s)) return fromPem(s);
+    return { label: '(입력)', der: readBytes(s.trim(), fmt) };
+  }
+
+  /* ---------- X.509 ---------- */
+  const nameStr = (seq) => (seq.children || []).map((set) => set.children.map((atv) => {
+    const [oid, val] = atv.children;
+    const key = OIDS[oidToString(oid.value)] || oidToString(oid.value);
+    return `${key}=${nodeValue(val)}`;
+  }).join('+')).join(', ');
+  const KU = ['digitalSignature', 'nonRepudiation', 'keyEncipherment', 'dataEncipherment', 'keyAgreement', 'keyCertSign', 'cRLSign', 'encipherOnly', 'decipherOnly'];
+  function extDetail(oid, der) {
+    const n = asn1Parse(der)[0];
+    switch (oid) {
+      case '2.5.29.17': case '2.5.29.18':
+        return n.children.map((g) => {
+          const v = g.value;
+          if (g.tag === 2) return `DNS:${latin1(v)}`;
+          if (g.tag === 1) return `email:${latin1(v)}`;
+          if (g.tag === 6) return `URI:${latin1(v)}`;
+          if (g.tag === 7) return `IP:${v.length === 4 ? Array.from(v).join('.') : toHex(v, false, ':')}`;
+          return `[${g.tag}]`;
+        }).join(', ');
+      case '2.5.29.19': {
+        const ca = n.children && n.children[0] && n.children[0].tag === 1 && n.children[0].value[0];
+        const pl = n.children && n.children.find((c) => c.tag === 2);
+        return `CA: ${ca ? '예 (인증 기관)' : '아니오 (최종 인증서)'}${pl ? `, pathLen ${bigFromBytes(pl.value)}` : ''}`;
+      }
+      case '2.5.29.15': {
+        const unused = n.value[0], bits = [];
+        for (let i = 0; i < (n.value.length - 1) * 8 - unused; i++) if (n.value[1 + (i >> 3)] & (0x80 >> (i & 7))) bits.push(KU[i]);
+        return bits.join(', ');
+      }
+      case '2.5.29.37': return n.children.map((c) => OIDS[oidToString(c.value)] || oidToString(c.value)).join(', ');
+      case '2.5.29.14': return toHex(n.value, true, ':');
+      case '2.5.29.35': { const k = n.children.find((c) => c.cls === 2 && c.tag === 0); return k ? toHex(k.value, true, ':') : ''; }
+      case '1.3.6.1.5.5.7.1.1': return n.children.map((ad) => `${OIDS[oidToString(ad.children[0].value)] || ''} ${latin1(ad.children[1].value)}`).join(', ');
+      case '2.5.29.31': {
+        const uris = [];
+        const walk = (x) => { if (x.cls === 2 && x.tag === 6 && !x.constructed) uris.push(latin1(x.value)); (x.children || []).forEach(walk); };
+        walk(n);
+        return uris.join(', ');
+      }
+      case '2.5.29.32': return n.children.map((p) => OIDS[oidToString(p.children[0].value)] || oidToString(p.children[0].value)).join(', ');
+      default: return `${der.length} B`;
+    }
+  }
+  async function x509Report(der) {
+    const cert = asn1Parse(der)[0];
+    if (!cert || !cert.children || cert.children.length !== 3) throw new Error('X.509 인증서 구조가 아닙니다 (SEQUENCE { tbsCertificate, 서명 알고리즘, 서명 }).');
+    const tbs = cert.children[0].children;
+    const off = tbs[0].cls === 2 ? 1 : 0;
+    const version = off ? Number(bigFromBytes(tbs[0].children[0].value)) + 1 : 1;
+    const serial = toHex(tbs[off].value, true, ':');
+    const sigAlg = oidToString(tbs[off + 1].children[0].value);
+    const [nb, na] = tbs[off + 3].children.map(parseTime);
+    const spki = tbs[off + 5];
+    const keyOid = oidToString(spki.children[0].children[0].value);
+    let keyDesc = OIDS[keyOid] || keyOid;
+    if (keyOid === '1.2.840.113549.1.1.1') {
+      const rsa = spki.children[1].children[0].children;
+      const n = rsa[0].value;
+      keyDesc = `RSA ${(n.length - (n[0] === 0 ? 1 : 0)) * 8}비트, e=${bigFromBytes(rsa[1].value)}`;
+    } else if (keyOid === '1.2.840.10045.2.1') keyDesc = `EC ${OIDS[oidToString(spki.children[0].children[1].value)] || ''}`;
+    const now = new Date();
+    const status = now < nb ? '⚠ 아직 유효 기간 전' : now > na ? '✗ 만료됨' : `✓ 유효 (${Math.ceil((na - now) / 86400000)}일 남음)`;
+    const issuer = nameStr(tbs[off + 2]), subject = nameStr(tbs[off + 4]);
+    const lines = [
+      `주체 (Subject)     ${subject}`, `발급자 (Issuer)    ${issuer}${issuer === subject ? '  ← 자체 서명 인증서' : ''}`,
+      `유효 기간          ${nb.toISOString()} ~ ${na.toISOString()}`, `상태               ${status}`,
+      `공개키             ${keyDesc}`, `서명 알고리즘      ${OIDS[sigAlg] || sigAlg}`, `일련번호           ${serial}`, `버전               v${version}`,
+    ];
+    const extWrap = tbs.find((c) => c.cls === 2 && c.tag === 3);
+    if (extWrap) {
+      lines.push('', '■ 확장 필드');
+      for (const ext of extWrap.children[0].children) {
+        const oid = oidToString(ext.children[0].value);
+        const critical = ext.children.length === 3 && ext.children[1].value[0];
+        const oct = ext.children[ext.children.length - 1];
+        let detail;
+        try { detail = extDetail(oid, oct.value); } catch { detail = '(해석 불가)'; }
+        lines.push(`  ${(OIDS[oid] || oid).padEnd(24)}${critical ? ' [중요]' : ''}  ${detail}`);
+      }
+    }
+    if (subject.includes('CN=') && !lines.some((l) => l.includes('subjectAltName'))) lines.push('', '⚠ SAN이 없습니다 — 최신 브라우저는 CN만 있는 서버 인증서를 신뢰하지 않습니다.');
+    const fp = async (a) => toHex(new Uint8Array(await subtle().digest(a, der)), true, ':');
+    lines.push('', '■ 지문', `  SHA-256  ${await fp('SHA-256')}`, `  SHA-1    ${await fp('SHA-1')}`);
+    return lines.join('\n');
+  }
+
+  /* ---------- JWT ---------- */
+  function jwtParts(token) {
+    const parts = token.trim().split('.');
+    if (parts.length === 5) throw new Error('점이 4개인 토큰은 JWE(암호화된 JWT)입니다. 페이로드를 보려면 복호화 키가 필요합니다.');
+    if (parts.length !== 3) throw new Error('JWT는 점(.)으로 구분된 header.payload.signature 형식이어야 합니다.');
+    const parse = (p, name) => { try { return JSON.parse(utf8Decode(b64decode(p), true)); } catch { throw new Error(`${name}를 해석할 수 없습니다.`); } };
+    return { parts, header: parse(parts[0], 'Header'), payload: parse(parts[1], 'Payload') };
+  }
+  function jwtDecode(token) {
+    const { parts, header, payload } = jwtParts(token.trim().split('.').length === 2 ? token.trim() + '.' : token);
+    let out = `// Header\n${JSON.stringify(header, null, 2)}\n\n// Payload\n${JSON.stringify(payload, null, 2)}\n`;
+    const times = ['iat', 'nbf', 'exp'].filter((k) => typeof payload[k] === 'number');
+    if (times.length) {
+      out += '\n// 시간 클레임\n';
+      const now = Date.now() / 1000;
+      for (const k of times) {
+        let note = '';
+        if (k === 'exp') note = payload[k] < now ? '  ← 만료됨' : '  ← 유효';
+        if (k === 'nbf' && payload[k] > now) note = '  ← 아직 사용 불가';
+        out += `${k}: ${new Date(payload[k] * 1000).toISOString()}${note}\n`;
+      }
+    }
+    out += `\n// Signature (${header.alg || '알 수 없음'})\n${parts[2] || '(없음)'}\n`;
+    if (String(header.alg).toLowerCase() === 'none') out += '\n⚠ alg가 none입니다 — 서명 검증이 비활성화된 토큰입니다.\n';
+    return out;
+  }
+  const JWT_ALGS = {
+    HS256: { kind: 'hmac', hash: 'SHA-256' }, HS384: { kind: 'hmac', hash: 'SHA-384' }, HS512: { kind: 'hmac', hash: 'SHA-512' },
+    RS256: { imp: { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' }, sign: { name: 'RSASSA-PKCS1-v1_5' } },
+    RS384: { imp: { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-384' }, sign: { name: 'RSASSA-PKCS1-v1_5' } },
+    RS512: { imp: { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-512' }, sign: { name: 'RSASSA-PKCS1-v1_5' } },
+    PS256: { imp: { name: 'RSA-PSS', hash: 'SHA-256' }, sign: { name: 'RSA-PSS', saltLength: 32 } },
+    PS384: { imp: { name: 'RSA-PSS', hash: 'SHA-384' }, sign: { name: 'RSA-PSS', saltLength: 48 } },
+    PS512: { imp: { name: 'RSA-PSS', hash: 'SHA-512' }, sign: { name: 'RSA-PSS', saltLength: 64 } },
+    ES256: { imp: { name: 'ECDSA', namedCurve: 'P-256' }, sign: { name: 'ECDSA', hash: 'SHA-256' } },
+    ES384: { imp: { name: 'ECDSA', namedCurve: 'P-384' }, sign: { name: 'ECDSA', hash: 'SHA-384' } },
+    ES512: { imp: { name: 'ECDSA', namedCurve: 'P-521' }, sign: { name: 'ECDSA', hash: 'SHA-512' } },
+    EdDSA: { imp: { name: 'Ed25519' }, sign: { name: 'Ed25519' } },
+  };
+  const secretBytes = (o) => (o.secretFmt === 'base64' ? b64decode(o.key.trim()) : utf8(o.key));
+  async function jwtVerify(token, o) {
+    const { parts, header } = jwtParts(token);
+    const alg = header.alg;
+    if (!alg || String(alg).toLowerCase() === 'none') return '✗ alg가 none입니다 — 서명이 없는 토큰이므로 절대 신뢰하면 안 됩니다.';
+    const a = JWT_ALGS[alg];
+    if (!a) throw new Error(`지원하지 않는 알고리즘입니다: ${alg}`);
+    if (!o.key.trim()) throw new Error(a.kind === 'hmac' ? '"키" 칸에 HMAC 비밀키를 넣으세요.' : '"키" 칸에 공개키(PEM 또는 JWK)를 넣으세요.');
+    const data = utf8(`${parts[0]}.${parts[1]}`);
+    const sig = b64decode(parts[2]);
+    let ok;
+    if (a.kind === 'hmac') {
+      const expected = await DL.fn.hmac(a.hash, secretBytes(o), data);
+      ok = expected.length === sig.length && expected.every((v, i) => v === sig[i]);
+    } else {
+      const key = await DL.fn.importKey(o.key, a.imp, ['verify'], 'public');
+      ok = await subtle().verify(a.sign, key, sig, data);
+    }
+    return `${ok ? '✓ 서명이 유효합니다.' : '✗ 서명이 유효하지 않습니다 — 키가 다르거나 토큰이 변조되었습니다.'}  (alg: ${alg})\n\n${jwtDecode(token)}`;
+  }
+  async function jwtSign(payloadText, o) {
+    let payload;
+    try { payload = JSON.parse(payloadText); } catch { throw new Error('페이로드는 JSON이어야 합니다. 예: {"sub":"1234","name":"홍길동"}'); }
+    const a = JWT_ALGS[o.alg];
+    if (!o.key.trim()) throw new Error(a.kind === 'hmac' ? '"키" 칸에 HMAC 비밀키를 넣으세요.' : '"키" 칸에 개인키(PEM 또는 JWK)를 넣으세요.');
+    const input = `${b64url(utf8(JSON.stringify({ alg: o.alg, typ: 'JWT' })))}.${b64url(utf8(JSON.stringify(payload)))}`;
+    let sig;
+    if (a.kind === 'hmac') sig = await DL.fn.hmac(a.hash, secretBytes(o), utf8(input));
+    else sig = new Uint8Array(await subtle().sign(a.sign, await DL.fn.importKey(o.key, a.imp, ['sign'], 'private'), utf8(input)));
+    return `${input}.${b64url(sig)}`;
+  }
+
+  /* ---------- JWK ---------- */
+  function jwkAlg(jwk) {
+    if (jwk.kty === 'RSA') return { name: 'RSA-PSS', hash: 'SHA-256' };
+    if (jwk.kty === 'EC') return { name: 'ECDSA', namedCurve: jwk.crv };
+    if (jwk.kty === 'OKP') return { name: jwk.crv };
+    throw new Error(`지원하지 않는 kty입니다: ${jwk.kty} (oct 대칭키는 PEM으로 바꿀 수 없습니다)`);
+  }
+  async function thumbprint(jwk) {
+    const req = { RSA: ['e', 'kty', 'n'], EC: ['crv', 'kty', 'x', 'y'], OKP: ['crv', 'kty', 'x'] }[jwk.kty];
+    const json = `{${req.map((k) => `"${k}":"${jwk[k]}"`).join(',')}}`;
+    return b64url(new Uint8Array(await subtle().digest('SHA-256', utf8(json))));
+  }
+  async function jwkToPem(text) {
+    let j;
+    try { j = JSON.parse(text); } catch { throw new Error('JWK JSON을 해석할 수 없습니다.'); }
+    const keys = Array.isArray(j.keys) ? j.keys : [j];
+    const out = [];
+    for (const k of keys) {
+      const alg = jwkAlg(k);
+      const pub = { ...k }; delete pub.d; delete pub.p; delete pub.q; delete pub.dp; delete pub.dq; delete pub.qi; delete pub.key_ops; delete pub.alg; delete pub.use;
+      const head = `# ${k.kid ? `kid=${k.kid} · ` : ''}${k.kty}${k.crv ? ' ' + k.crv : ''}${k.alg ? ' · ' + k.alg : ''} · thumbprint ${await thumbprint(k)}`;
+      const blocks = [head];
+      if (k.d) {
+        const priv = { ...k }; delete priv.key_ops; delete priv.alg; delete priv.use;
+        const key = await subtle().importKey('jwk', priv, alg, true, alg.name === 'X25519' ? ['deriveBits'] : ['sign']);
+        blocks.push(toPem(new Uint8Array(await subtle().exportKey('pkcs8', key)), 'PRIVATE KEY'));
+      }
+      const pk = await subtle().importKey('jwk', pub, alg, true, alg.name === 'X25519' ? [] : ['verify']);
+      blocks.push(toPem(new Uint8Array(await subtle().exportKey('spki', pk)), 'PUBLIC KEY'));
+      out.push(blocks.join('\n'));
+    }
+    return out.join('\n\n');
+  }
+  async function pemToJwk(text) {
+    const { label, der } = fromPem(text);
+    const kind = /PRIVATE/.test(label) ? 'private' : 'public';
+    // 알고리즘 OID로 가져오기 방식을 정한다
+    const flat = [];
+    const walk = (ns) => ns.forEach((n) => { if (n.tag === 6 && n.cls === 0) flat.push(oidToString(n.value)); if (n.children) walk(n.children); });
+    walk(asn1Parse(label === 'CERTIFICATE' ? der : der));
+    let alg;
+    if (/^RSA /.test(label) || flat.includes('1.2.840.113549.1.1.1')) alg = { name: 'RSA-PSS', hash: 'SHA-256' };
+    else if (flat.includes('1.2.840.10045.2.1') || label === 'EC PRIVATE KEY') {
+      const crv = flat.includes('1.3.132.0.34') ? 'P-384' : flat.includes('1.3.132.0.35') ? 'P-521' : 'P-256';
+      alg = { name: 'ECDSA', namedCurve: crv };
+    } else if (flat.includes('1.3.101.112')) alg = { name: 'Ed25519' };
+    else if (flat.includes('1.3.101.110')) alg = { name: 'X25519' };
+    else throw new Error('키 알고리즘을 알 수 없습니다.');
+    const usages = kind === 'private' ? (alg.name === 'X25519' ? ['deriveBits'] : ['sign']) : (alg.name === 'X25519' ? [] : ['verify']);
+    const key = await DL.fn.importKey(text, alg, usages, kind);
+    const jwk = await subtle().exportKey('jwk', key);
+    delete jwk.key_ops; delete jwk.ext; delete jwk.alg;
+    jwk.kid = await thumbprint(jwk);
+    return JSON.stringify(jwk, null, 2);
+  }
+
+  /* ---------- SAML ---------- */
+  function prettyXml(xml) {
+    let depth = 0;
+    return xml.replace(/>\s*</g, '>\n<').split('\n').map((line) => {
+      if (/^<\//.test(line)) depth = Math.max(0, depth - 1);
+      const out = '  '.repeat(depth) + line;
+      if (/^<[^!?/][^>]*[^/]>$/.test(line) && !/<\/[^>]+>$/.test(line)) depth++;
+      return out;
+    }).join('\n');
+  }
+  async function samlDecode(s) {
+    let t = s.trim();
+    const m = /(?:SAMLRequest|SAMLResponse)=([^&\s]+)/.exec(t);
+    if (m) t = m[1];
+    if (/%[0-9a-f]{2}/i.test(t)) t = decodeURIComponent(t.replace(/\+/g, ' '));
+    const bytes = b64decode(t);
+    let xml;
+    let how = 'Base64 (HTTP-POST 바인딩)';
+    try { xml = utf8Decode(bytes, true); if (!xml.trim().startsWith('<')) throw new Error(); }
+    catch {
+      xml = utf8Decode((await DL.fn.decompress(bytes, 'raw')).out);
+      how = 'Base64 + Raw DEFLATE (HTTP-Redirect 바인딩)';
+    }
+    const notes = [`// 인코딩: ${how}`];
+    if (/<(\w+:)?Signature[\s>]/.test(xml)) notes.push('// 서명 포함 (검증은 하지 않음)');
+    if (/<(\w+:)?EncryptedAssertion/.test(xml)) notes.push('// 암호화된 Assertion 포함 — 내용 확인에는 SP 개인키가 필요합니다');
+    return `${notes.join('\n')}\n\n${prettyXml(xml)}`;
+  }
+
+  /* ---------- JWE (RFC 7516) ---------- */
+  const JWE_ENC = {
+    A128GCM: { gcm: true, len: 16 }, A192GCM: { gcm: true, len: 24 }, A256GCM: { gcm: true, len: 32 },
+    'A128CBC-HS256': { len: 32, hash: 'SHA-256', tag: 16 }, 'A192CBC-HS384': { len: 48, hash: 'SHA-384', tag: 24 }, 'A256CBC-HS512': { len: 64, hash: 'SHA-512', tag: 32 },
+  };
+  function symKey(o) {
+    const t = o.key.trim();
+    if (t.startsWith('{')) {
+      let j; try { j = JSON.parse(t); } catch { throw new Error('JWK JSON을 해석할 수 없습니다.'); }
+      if (!j.k) throw new Error('대칭키 JWK(kty: "oct")에는 k 값이 있어야 합니다.');
+      return b64decode(j.k);
+    }
+    return o.keyFmt === 'hex' ? DL.fromHex(t) : o.keyFmt === 'text' ? utf8(t) : b64decode(t);
+  }
+  /* Concat KDF (NIST SP 800-56A, RFC 7518 §4.6) — SHA-256 고정 */
+  const be32 = (n) => Uint8Array.of((n >>> 24) & 255, (n >>> 16) & 255, (n >>> 8) & 255, n & 255);
+  const lenPrefixed = (b) => concat(be32(b.length), b);
+  async function concatKdf(Z, keyBits, algId, apu, apv) {
+    const info = concat(lenPrefixed(utf8(algId)), lenPrefixed(apu), lenPrefixed(apv), be32(keyBits));
+    const outLen = keyBits / 8, reps = Math.ceil(outLen / 32);
+    let out = new Uint8Array(0);
+    for (let i = 1; i <= reps; i++) out = concat(out, new Uint8Array(await subtle().digest('SHA-256', concat(be32(i), Z, info))));
+    return out.slice(0, outLen);
+  }
+  const CRV_BITS = { 'P-256': 256, 'P-384': 384, 'P-521': 528 };
+  // ECDH-ES: 임시 공개키(epk)와 수신자 개인키로 공유 비밀 Z를 만든다.
+  async function ecdhZ(epk, keyText) {
+    if (!epk || typeof epk !== 'object' || (!epk.crv && epk.kty !== 'OKP')) throw new Error('ECDH-ES 토큰 헤더에 임시 공개키(epk)가 없습니다.');
+    const okp = epk.kty === 'OKP';
+    const alg = okp ? { name: 'X25519' } : { name: 'ECDH', namedCurve: epk.crv };
+    let pub, prv;
+    try { pub = await subtle().importKey('jwk', epk, alg, false, []); }
+    catch { throw new Error('토큰의 임시 공개키(epk)를 가져올 수 없습니다 — 지원하지 않는 곡선일 수 있습니다.'); }
+    prv = await DL.fn.importKey(keyText, alg, ['deriveBits'], 'private');
+    const da = okp ? { name: 'X25519', public: pub } : { name: 'ECDH', public: pub };
+    try { return new Uint8Array(await subtle().deriveBits(da, prv, okp ? 256 : (CRV_BITS[epk.crv] || null))); }
+    catch { return new Uint8Array(await subtle().deriveBits(da, prv, null)); }
+  }
+  async function aesKwUnwrap(kek, wrapped, errMsg) {
+    try {
+      const k = await subtle().importKey('raw', kek, 'AES-KW', false, ['unwrapKey']);
+      const raw = await subtle().unwrapKey('raw', wrapped, k, 'AES-KW', { name: 'HMAC', hash: 'SHA-256', length: (wrapped.length - 8) * 8 }, true, ['sign']);
+      return new Uint8Array(await subtle().exportKey('raw', raw));
+    } catch { throw new Error(errMsg); }
+  }
+
+  async function jweDecrypt(token, o) {
+    const parts = token.trim().split('.');
+    if (parts.length !== 5) throw new Error('JWE Compact 형식은 점(.)으로 구분된 5개 부분(header.key.iv.ciphertext.tag)이어야 합니다.');
+    const [h64, ek64, iv64, ct64, tag64] = parts;
+    let header;
+    try { header = JSON.parse(utf8Decode(b64decode(h64), true)); } catch { throw new Error('JWE 헤더를 해석할 수 없습니다.'); }
+    const { alg, enc } = header;
+    const head = `// Header\n${JSON.stringify(header, null, 2)}\n`;
+    const e = JWE_ENC[enc];
+    if (!e) return `${head}\n✗ 지원하지 않는 콘텐츠 암호화 방식입니다: ${enc}`;
+    if (!o.key.trim()) {
+      const need = alg === 'dir' ? '콘텐츠 암호화 키(CEK) 자체'
+        : /^RSA/.test(alg) ? 'RSA 개인키 PEM/JWK'
+        : /^ECDH-ES/.test(alg) ? '수신자 EC/OKP 개인키 PEM/JWK'
+        : /^PBES2/.test(alg) ? '비밀번호'
+        : /KW$/.test(alg) ? '키 래핑용 AES 키' : '지원하지 않음';
+      return `${head}\n키를 입력하면 복호화합니다. (alg ${alg}: ${need})`;
+    }
+    let cek;
+    if (alg === 'dir') cek = symKey(o);
+    else if (alg === 'RSA-OAEP' || alg === 'RSA-OAEP-256') {
+      const key = await DL.fn.importKey(o.key, { name: 'RSA-OAEP', hash: alg === 'RSA-OAEP' ? 'SHA-1' : 'SHA-256' }, ['decrypt'], 'private');
+      try { cek = new Uint8Array(await subtle().decrypt({ name: 'RSA-OAEP' }, key, b64decode(ek64))); }
+      catch { throw new Error('암호화된 키(CEK)를 풀 수 없습니다 — 다른 RSA 키로 암호화된 토큰입니다.'); }
+    } else if (/^A(128|192|256)KW$/.test(alg)) {
+      const kek = symKey(o);
+      if (kek.length * 8 !== Number(alg.slice(1, 4))) throw new Error(`${alg}에는 ${alg.slice(1, 4)}비트(${Number(alg.slice(1, 4)) / 8} B) 키가 필요합니다. (현재 ${kek.length} B)`);
+      const wrapped = b64decode(ek64);
+      try {
+        const k = await subtle().importKey('raw', kek, 'AES-KW', false, ['unwrapKey']);
+        const raw = await subtle().unwrapKey('raw', wrapped, k, 'AES-KW', { name: 'HMAC', hash: 'SHA-256', length: (wrapped.length - 8) * 8 }, true, ['sign']);
+        cek = new Uint8Array(await subtle().exportKey('raw', raw));
+      } catch { throw new Error('키 래핑을 풀 수 없습니다 — AES 키가 맞지 않습니다.'); }
+    } else if (alg === 'ECDH-ES' || /^ECDH-ES\+A(128|192|256)KW$/.test(alg)) {
+      const Z = await ecdhZ(header.epk, o.key);
+      const direct = alg === 'ECDH-ES';
+      const keyBits = direct ? e.len * 8 : Number(alg.slice(9, 12));
+      const apu = header.apu ? b64decode(header.apu) : new Uint8Array(0);
+      const apv = header.apv ? b64decode(header.apv) : new Uint8Array(0);
+      const dk = await concatKdf(Z, keyBits, direct ? enc : alg, apu, apv);
+      cek = direct ? dk : await aesKwUnwrap(dk, b64decode(ek64), 'ECDH로 유도한 키로 래핑을 풀 수 없습니다 — 개인키가 맞지 않거나 apu/apv가 다릅니다.');
+    } else if (/^PBES2-HS(256|384|512)\+A(128|192|256)KW$/.test(alg)) {
+      const bits = Number(alg.slice(-5, -2)), hash = `SHA-${alg.slice(8, 11)}`, p2c = Number(header.p2c);
+      if (!header.p2s || !p2c) throw new Error('PBES2 토큰 헤더에는 p2s(솔트)와 p2c(반복 횟수)가 있어야 합니다.');
+      if (p2c > 10000000) throw new Error(`반복 횟수(p2c=${p2c.toLocaleString()})가 비정상적으로 큽니다 — 토큰을 확인하세요.`);
+      const salt = concat(utf8(alg), Uint8Array.of(0), b64decode(header.p2s));
+      const pk = await subtle().importKey('raw', utf8(o.key), 'PBKDF2', false, ['deriveBits']);
+      const kek = new Uint8Array(await subtle().deriveBits({ name: 'PBKDF2', salt, iterations: p2c, hash }, pk, bits));
+      cek = await aesKwUnwrap(kek, b64decode(ek64), '키 래핑을 풀 수 없습니다 — 비밀번호가 맞지 않습니다.');
+    } else return `${head}\n✗ 지원하지 않는 키 관리 방식입니다: ${alg}\n(지원: dir, RSA-OAEP(-256), A128/192/256KW, ECDH-ES(+A128/192/256KW), PBES2-HS256/384/512+A128/192/256KW)`;
+    if (cek.length !== e.len) throw new Error(`${enc}에는 ${e.len} B 콘텐츠 키가 필요한데 ${cek.length} B입니다.`);
+    const aad = utf8(h64), iv = b64decode(iv64), ct = b64decode(ct64), tag = b64decode(tag64);
+    let pt;
+    if (e.gcm) {
+      try { pt = DL.fn.blockCrypt(DL.fn.AES, cek, iv, concat(ct, tag), { mode: 'gcm', aad: h64 }, true); }
+      catch { throw new Error('복호화 실패 — 인증 태그가 맞지 않습니다. 키가 다르거나 토큰이 변조되었습니다.'); }
+    } else {
+      const al = new Uint8Array(8);
+      new DataView(al.buffer).setBigUint64(0, BigInt(aad.length * 8));
+      const mac = (await DL.fn.hmac(e.hash, cek.slice(0, e.len / 2), concat(aad, iv, ct, al))).slice(0, e.tag);
+      if (mac.length !== tag.length || mac.some((v, i) => v !== tag[i])) throw new Error('복호화 실패 — 인증 태그(HMAC)가 맞지 않습니다. 키가 다르거나 토큰이 변조되었습니다.');
+      pt = DL.fn.blockCrypt(DL.fn.AES, cek.slice(e.len / 2), iv, ct, { mode: 'cbc', padding: 'pkcs7' }, true);
+    }
+    if (header.zip === 'DEF') pt = (await DL.fn.decompress(pt, 'raw')).out;
+    let body = utf8Decode(pt);
+    let note = '';
+    try { body = JSON.stringify(JSON.parse(body), null, 2); } catch { if (/^eyJ[\w-]+\.eyJ/.test(body)) note = '\n// 내용이 JWT입니다 (서명된 토큰을 암호화한 중첩 JWT) — JWT 디코더로 이어서 확인하세요.'; }
+    return `✓ 복호화 성공 (alg ${alg} · enc ${enc})\n\n${head}\n// Payload\n${body}${note}`;
+  }
+
+  /* ---------- HS* 서명키 사전 공격 (HMAC 비밀키 복구) ---------- */
+  // 튜토리얼·라이브러리 기본값과 흔한 약한 키. 실습용 토큰은 대부분 여기서 걸린다.
+  const COMMON_SECRETS = ['', 'secret', 'your-256-bit-secret', 'your-384-bit-secret', 'your-512-bit-secret', 'secretkey',
+    'secret123', 'password', 'password123', 'changeme', 'admin', 'administrator', 'root', 'toor', 'key', 'jwt', 'jwtsecret',
+    'jwt-secret', 'mysecret', 'my-secret', 'my-secret-key', 'supersecret', 'super-secret', 's3cr3t', 'topsecret', 'test',
+    'testing', 'dev', 'development', 'production', 'staging', 'default', 'example', 'demo', 'qwerty', '123456', '12345678',
+    '1234567890', 'letmein', 'welcome', 'access', 'token', 'signature', 'hmac', 'shhhh', 'secretpassword', 'P@ssw0rd', 'HS256'];
+  const SUFFIXES = ['', '1', '12', '123', '1234', '12345', '!', '!!', '123!', '@', '#', '$', '_', '2022', '2023', '2024', '2025', '01', '00', '007', '69', '420', '2020'];
+  function mangle(word) {
+    const out = [];
+    const bases = word ? [...new Set([word, word.toLowerCase(), word.toUpperCase(), word.charAt(0).toUpperCase() + word.slice(1)])] : [''];
+    for (const b of bases) for (const s of SUFFIXES) out.push(b + s);
+    return out;
+  }
+  const CHARSETS = { lower: 'abcdefghijklmnopqrstuvwxyz', alnum: 'abcdefghijklmnopqrstuvwxyz0123456789', digits: '0123456789', loweralpha: 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ' };
+  function jwtCrack(token, o) {
+    const parts = token.trim().split('.');
+    if (parts.length !== 3) throw new Error('header.payload.signature 형식의 JWT여야 합니다.');
+    let header;
+    try { header = JSON.parse(utf8Decode(b64decode(parts[0]), true)); } catch { throw new Error('헤더를 해석할 수 없습니다.'); }
+    const alg = String(header.alg || '').toUpperCase();
+    const variant = { HS256: 256, HS384: 384, HS512: 512 }[alg];
+    if (!variant) throw new Error(`HMAC 기반 토큰(HS256/384/512)만 지원합니다. 이 토큰의 alg는 "${header.alg || '없음'}"입니다. RS/ES/EdDSA는 공개키 암호라 사전 공격 대상이 아닙니다.`);
+    const input = utf8(`${parts[0]}.${parts[1]}`);
+    const target = b64decode(parts[2]);
+    if (!target.length) throw new Error('서명(세 번째 부분)이 비어 있습니다.');
+    const hit = (secret) => { const sig = DL.hmacSync(variant, utf8(secret), input); return sig.length === target.length && sig.every((v, i) => v === target[i]); };
+
+    const LIMIT = 3000000; // 브라우저가 멈추지 않도록 시도 상한
+    let tried = 0;
+    const seen = new Set();
+    const found = (secret) => `✓ 서명키를 찾았습니다! (${tried.toLocaleString()}개 시도 · alg ${alg})\n\n키: ${secret === '' ? '(빈 문자열)' : secret}\n길이: ${utf8(secret).length} B\n\n이 키로 토큰을 위조하거나 서명을 변조할 수 있습니다. 실제 서비스라면 32바이트 이상 무작위 키로 즉시 교체하세요.`;
+    const tryAll = (cands) => {
+      for (const s of cands) {
+        if (seen.has(s)) continue;
+        seen.add(s); tried++;
+        if (hit(s)) return s;
+        if (tried >= LIMIT) throw new Error(`시도 상한(${LIMIT.toLocaleString()}개)에 도달했습니다. 범위를 좁히거나, 큰 사전은 아래 hashcat을 쓰세요.`);
+      }
+      return null;
+    };
+
+    const words = [];
+    if (o.useCommon !== false) words.push(...COMMON_SECRETS);
+    for (const line of (o.wordlist || '').split('\n')) { const w = line.replace(/\r$/, ''); if (w !== '' || !words.includes('')) words.push(w); }
+    for (const w of words) { const r = tryAll(o.mangle ? mangle(w) : [w]); if (r !== null) return found(r); }
+
+    if (o.brute) {
+      const charset = CHARSETS[o.charset] || CHARSETS.lower;
+      const maxLen = Math.min(Math.max(1, Number(o.maxLen) || 4), 6);
+      for (let L = 1; L <= maxLen; L++) {
+        const idx = new Array(L).fill(0);
+        for (;;) {
+          let s = ''; for (let i = 0; i < L; i++) s += charset[idx[i]];
+          seen.add(s); tried++;
+          if (hit(s)) return found(s);
+          if (tried >= LIMIT) throw new Error(`시도 상한(${LIMIT.toLocaleString()}개, 길이 ${L}까지)에 도달했습니다. 더 긴 키는 hashcat을 쓰세요.`);
+          let p = L - 1; while (p >= 0) { if (++idx[p] < charset.length) break; idx[p] = 0; p--; }
+          if (p < 0) break;
+        }
+      }
+    }
+    return `✗ ${tried.toLocaleString()}개 후보에서 찾지 못했습니다. (alg ${alg})\n\n키가 사전에 없거나, 무작위로 생성된 강한 키일 수 있습니다. 더 큰 사전(rockyou 등)이나 본격적인 무차별 대입은 GPU 기반 오프라인 도구가 훨씬 빠릅니다:\n\n  hashcat -a 0 -m 16500 token.txt wordlist.txt      # 사전\n  hashcat -a 3 -m 16500 token.txt ?l?l?l?l?l?l       # 소문자 6자 무차별\n  john --format=HMAC-SHA${variant === 256 ? '256' : variant} token.txt    # John the Ripper\n\n(-m 16500 = JWT HS256/384/512)\n\n32바이트 이상 무작위 키는 사실상 복구할 수 없습니다 — 이 경우 키를 발급한 설정 파일·환경 변수·시크릿 매니저에서 직접 찾는 편이 빠릅니다.`;
+  }
+
+  Object.assign(DL.fn, { jwtCrack, jweDecrypt, jwtDecode, jwtVerify, jwtSign, asn1Tree, x509Report, jwkToPem, pemToJwk, samlDecode, OIDS });
+
+  const KEY_TEXTAREA = { id: 'key', label: '키', type: 'textarea', default: '', wide: true, placeholder: 'HS*: 비밀키 문자열 · RS/PS/ES/EdDSA: PEM 또는 JWK' };
+
+  DL.kits.token = {
+    asn1Parse, fmtOption,
+    jwtDecode, jwtVerify, jwtSign, jwtCrack, jweDecrypt, jwkToPem, pemToJwk,
+    asn1Tree, x509Report, samlDecode, readDer, JWT_ALGS, KEY_TEXTAREA,
+  };
+
+  DL.addCategory({
+    id: 'token',
+    name: '웹 토큰·인증서',
+    desc: 'JWT 분석·서명 검증부터 JWK, PEM·DER·ASN.1, X.509 인증서, SAML까지 — 웹 인증 데이터 해부',
+    color: 'pink',
+    tools: [],
+    planned: [],
+  });
+})(globalThis.DecryptLab);

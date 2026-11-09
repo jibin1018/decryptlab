@@ -375,7 +375,15 @@
   const randomBytes = (n) => root.crypto.getRandomValues(new Uint8Array(n));
 
   /* ---------- 레지스트리 ---------- */
-  DL.addCategory = (cat) => { DL.CATEGORIES.push(cat); return cat; };
+  DL.kits = DL.kits || {}; // 카테고리별 공유 헬퍼 모음 (파일 분리용)
+  DL.addCategory = (cat) => { if (!cat.tools) cat.tools = []; DL.CATEGORIES.push(cat); return cat; };
+  // 카테고리는 먼저 등록되고, 각 도구 파일이 자신을 이 카테고리에 추가한다. (로드 순서 = 목차 순서)
+  DL.addTool = (catId, tool) => {
+    const c = DL.CATEGORIES.find((x) => x.id === catId);
+    if (!c) throw new Error('알 수 없는 카테고리: ' + catId);
+    c.tools.push(tool);
+    return tool;
+  };
   DL.findTool = (catId, toolId) => {
     const c = DL.CATEGORIES.find((x) => x.id === catId);
     return c && c.tools.find((t) => t.id === toolId);
