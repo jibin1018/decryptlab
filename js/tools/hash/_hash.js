@@ -688,8 +688,10 @@
   const HASHES = [['SHA-256', 'SHA-256'], ['SHA-1', 'SHA-1'], ['SHA-384', 'SHA-384'], ['SHA-512', 'SHA-512']];
 
   DL.kits.hash = {
-    utf8, readBytes, formatBytes, fmtOption, randomBytes,
-    allHashes, blake3, shake, hmac, kdf, compareLine, HASHES,
+    utf8, toHex, readBytes, formatBytes, fmtOption, randomBytes, md5, crc32, sha, hx,
+    allHashes, shake, hmac, kdf, compareLine, HASHES,
+    sha3, keccakHash, blake2b, blake2s, blake3, ripemd160, sm3, whirlpool,
+    crc32c, crc64xz, crcGeneric, adler32, fnv1a32, fnv1a64, xxh32, xxh64, murmur3,
     bcryptHashStr, bcryptGenSalt, bcryptVerify, argonEncode, argon2Compute, argon2Verify,
   };
 
