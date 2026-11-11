@@ -99,6 +99,7 @@
       <a class="topic-card accent-${c.color}${soon ? ' soon' : ''}" href="#/${c.id}">
         ${soon ? '<span class="badge">준비 중</span>' : ''}
         <h2>${esc(c.name)}</h2>
+        <p>${esc(c.desc)}</p>
         <div class="meta">${meta}</div>
       </a>`;
   }

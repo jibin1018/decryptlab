@@ -22,7 +22,7 @@ Web Crypto(SHA·HMAC·RSA 등)는 `localhost`나 HTTPS에서만 동작하므로 
 | 고전 암호 | 빈도 분석·키 추정, 카이사르, ROT13/47, Atbash, Affine, 단일 치환, 비즈네르, Beaufort, Autokey, Playfair, Hill, Polybius, Bifid, ADFGVX, 열 전치, 레일펜스, Bacon, XOR, 모스 | — |
 | 대칭키 암호 | AES·ARIA·SEED (ECB·CBC·CTR·CFB·OFB·GCM, 5종 패딩), ChaCha20-Poly1305, OpenSSL·CryptoJS 호환, RC4 | — |
 | 공개키 암호·서명 | RSA-OAEP, 전자서명(ECDSA·Ed25519·RSA-PSS·PKCS#1), 키 교환(X25519·ECDH), 교과서 RSA(CTF) | — |
-| 해시·MAC·KDF | MD5, SHA-1, SHA-2, SHA-3, Keccak, BLAKE2, BLAKE3, RIPEMD-160, SM3, Whirlpool(계열별 개별 도구), 체크섬(CRC16/32/32C/64·Adler-32·FNV·xxHash·MurmurHash3), 가변 길이 해시(SHAKE·BLAKE3), HMAC, PBKDF2·scrypt·HKDF, 비밀번호 해시(bcrypt·Argon2id/i/d 생성·검증) | — |
+| 해시·MAC·KDF | MD5, SHA-1, SHA-2, SHA-3, Keccak, BLAKE2, BLAKE3, RIPEMD-160, SM3, Whirlpool(계열별 개별 도구), 체크섬(CRC16/32/32C/64·Adler-32·FNV·xxHash·MurmurHash3), 가변 길이 해시(SHAKE·BLAKE3), HMAC, PBKDF2·scrypt·HKDF, 비밀번호 해시(bcrypt·Argon2id/i/d 생성·검증), 해시 크래커(본인 소유·실습용 사전/무차별 대입) | — |
 | 압축·데이터 복원 | Gzip·Zlib·Raw DEFLATE 압축/해제, XZ·LZMA·Bzip2 해제, LZ4 해제, 압축 형식 식별, ZIP 목록·추출, Brotli·Zstd 해제(브라우저가 지원할 때만 표시) | — |
 | 웹 토큰·인증서 | JWT 디코더, JWT 서명 검증·생성(HS·RS·PS·ES·EdDSA), JWT 서명키 사전 공격(HS256/384/512), JWE 복호화(dir·RSA-OAEP·AES-KW·ECDH-ES·PBES2 / GCM·CBC-HS), JWK↔PEM, PEM·DER·ASN.1 뷰어, X.509 인증서, SAML 디코더 | — |
 | 바이너리 분석 | 헥스 뷰어, 파일 시그니처 판별, 엔트로피 분석, 문자열 추출, XOR 전수 조사, Data URI 분석 | — |
