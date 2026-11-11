@@ -492,7 +492,7 @@
   DL.addCategory({
     id: 'symmetric',
     name: '대칭키 암호',
-    desc: 'AES·ARIA·SEED와 ChaCha20-Poly1305 — 운용 모드·패딩·IV를 직접 지정하는 암호화와 복호화',
+    desc: 'AES·ARIA·SEED·ChaCha20 암·복호화',
     color: 'teal',
     tools: [],
   });

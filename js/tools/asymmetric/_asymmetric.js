@@ -69,7 +69,7 @@
   DL.addCategory({
     id: 'asymmetric',
     name: '공개키 암호·서명',
-    desc: 'RSA-OAEP 암호화, ECDSA·Ed25519·RSA 전자서명, ECDH·X25519 키 교환, CTF용 교과서 RSA 풀이',
+    desc: 'RSA·ECDSA·키 교환·전자서명',
     color: 'indigo',
     tools: [],
   });

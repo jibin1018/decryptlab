@@ -698,7 +698,7 @@
   DL.addCategory({
     id: 'hash',
     name: '해시·MAC·KDF',
-    desc: 'MD5·SHA 해시와 CRC32 체크섬, HMAC 메시지 인증, PBKDF2·HKDF 키 유도',
+    desc: '해시·HMAC·KDF·비밀번호 해시·크래커',
     color: 'red',
     tools: [],
     planned: [],

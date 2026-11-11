@@ -10,7 +10,7 @@
   DL.addCategory({
     id: 'auto',
     name: '자동 분석',
-    desc: '정체 모를 문자열을 넣으면 가능한 인코딩·암호·해시 후보와 디코딩 결과를 한 번에 보여줍니다',
+    desc: '정체 모를 값을 자동으로 풀고 유형을 추정합니다',
     color: 'lime',
     tools: [],
     planned: [],

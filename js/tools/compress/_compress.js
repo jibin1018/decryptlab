@@ -37,7 +37,7 @@
   DL.addCategory({
     id: 'compress',
     name: '압축·데이터 복원',
-    desc: '암호문처럼 보이는 데이터가 실제로는 압축된 경우가 많습니다 — Gzip·Zlib·Deflate 압축과 해제, ZIP 내용 확인',
+    desc: 'Gzip·XZ·LZ4·ZIP 압축 해제와 식별',
     color: 'yellow',
     tools: [],
     planned: [],

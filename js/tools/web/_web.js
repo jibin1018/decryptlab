@@ -39,7 +39,7 @@
   DL.addCategory({
     id: 'web',
     name: '웹·문자 인코딩',
-    desc: 'URL·HTML·JS 이스케이프부터 UTF-16, Punycode, 메일 제목 인코딩, EUC-KR 같은 문자셋까지',
+    desc: 'URL·HTML·유니코드·문자셋 등 웹 인코딩',
     color: 'orange',
     tools: [],
   });

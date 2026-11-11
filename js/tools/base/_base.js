@@ -45,7 +45,7 @@
   DL.addCategory({
     id: 'base',
     name: 'Base 계열 인코딩',
-    desc: 'Base64부터 Base91·Base45·Base58Check까지 — 바이너리를 텍스트로 옮기는 인코딩 11종',
+    desc: '바이너리를 텍스트로 옮기는 Base 인코딩 모음',
     color: 'blue',
     tools: [],
   });

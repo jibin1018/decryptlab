@@ -113,7 +113,7 @@
   DL.addCategory({
     id: 'classic',
     name: '고전 암호',
-    desc: '카이사르·비즈네르부터 Playfair·Hill·ADFGVX까지 — 치환·전치 암호 19종과 빈도 분석기',
+    desc: '카이사르·비즈네르 등 치환·전치 고전 암호',
     color: 'purple',
     tools: [],
   });

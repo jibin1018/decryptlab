@@ -512,7 +512,7 @@
   DL.addCategory({
     id: 'token',
     name: '웹 토큰·인증서',
-    desc: 'JWT 분석·서명 검증부터 JWK, PEM·DER·ASN.1, X.509 인증서, SAML까지 — 웹 인증 데이터 해부',
+    desc: 'JWT·JWE·JWK·X.509·SAML 분석',
     color: 'pink',
     tools: [],
     planned: [],

@@ -62,7 +62,7 @@
   DL.addCategory({
     id: 'radix',
     name: '진법·데이터 표현',
-    desc: '2·8·10·16진수 바이트부터 IEEE 754 부동소수점, 엔디안·정수 해석, Protobuf VarInt까지',
+    desc: '진법·부동소수점·엔디안·정수 표현',
     color: 'green',
     tools: [],
   });
